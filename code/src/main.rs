@@ -57,6 +57,8 @@ async fn main(spawner: Spawner) {
         [i(4, 1), i(4, 3)],
         [i(5, 1), i(5, 3)],
     ];
+    // Order matters here
+    let election_tracker_leds = [i(1, 6), i(2, 6), i(3, 6)];
 
     let ws2812_gpio = p.GPIO2;
 
@@ -72,9 +74,10 @@ async fn main(spawner: Spawner) {
     let mut led_colors = [Default::default(); TOTAL_LEDS];
 
     // Scaling factor
-    let led_brightness = 0.1;
+    let led_brightness = 0.05;
     let aura_color = RGB8::new(255, 0, 255);
     let liberal_color = RGB8::new(0, 127, 255);
+    let election_tracker_color = RGB8::new(0, 255, 0);
 
     // Turn on Aura LEDs. Make them purple for now to differentiate the boards.
     for aura_led_index in aura_leds {
@@ -86,6 +89,11 @@ async fn main(spawner: Spawner) {
         for led_index in policy {
             led_colors[led_index] = liberal_color.scale(led_brightness);
         }
+    }
+
+    // Turn on the election tracker LEDs
+    for election_tracker_led_index in election_tracker_leds {
+        led_colors[election_tracker_led_index] = election_tracker_color.scale(led_brightness);
     }
 
     leds_adapter.write(led_colors).await.unwrap();
