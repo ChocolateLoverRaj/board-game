@@ -20,7 +20,7 @@ bench = false
 
 [lib]
 name = "lib"
-path = "src/lib.rs"
+path = "src/lib/mod.rs"
 test = false
 doctest = false
 bench = false
