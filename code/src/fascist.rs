@@ -9,6 +9,7 @@ use esp_hal::{
 };
 use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffer};
 use esp_println as _;
+use lib::LED_BRIGHTNESS;
 use smart_leds::{RGB8, SmartLedsWriteAsync};
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -39,7 +40,7 @@ async fn main(spawner: Spawner) {
     let software_interrupt = SoftwareInterruptControl::new(p.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
 
-    info!("Welcome to the electronic board game Secret Hitler");
+    info!("Welcome to the electronic board game Secret Hitler. This is the fascist board.");
 
     // Some LEDS may be connected but not used
     const TOTAL_LEDS: usize = 64;
@@ -48,7 +49,7 @@ async fn main(spawner: Spawner) {
         y * 8 + x
     }
     // No particular order to this as of now
-    let aura_leds = [i(0, 0), i(6, 0), i(0, 2), i(6, 2), i(0, 4), i(6, 4)];
+    let aura_leds = [i(0, 0), i(7, 0), i(0, 2), i(7, 2), i(0, 4), i(7, 4)];
     // Each group of leds represents the LEDs for that policy slot
     let policy_leds = [
         [i(1, 1), i(1, 3)],
@@ -56,9 +57,8 @@ async fn main(spawner: Spawner) {
         [i(3, 1), i(3, 3)],
         [i(4, 1), i(4, 3)],
         [i(5, 1), i(5, 3)],
+        [i(6, 1), i(6, 3)],
     ];
-    // Order matters here
-    let election_tracker_leds = [i(1, 6), i(2, 6), i(3, 6)];
 
     let ws2812_gpio = p.GPIO2;
 
@@ -74,26 +74,19 @@ async fn main(spawner: Spawner) {
     let mut led_colors = [Default::default(); TOTAL_LEDS];
 
     // Scaling factor
-    let led_brightness = 0.05;
-    let aura_color = RGB8::new(255, 0, 255);
-    let liberal_color = RGB8::new(0, 127, 255);
-    let election_tracker_color = RGB8::new(0, 255, 0);
+    let aura_color = RGB8::new(255, 50, 50);
+    let liberal_color = RGB8::new(255, 0, 0);
 
-    // Turn on Aura LEDs. Make them purple for now to differentiate the boards.
+    // Turn on Aura LEDs
     for aura_led_index in aura_leds {
-        led_colors[aura_led_index] = aura_color.scale(led_brightness);
+        led_colors[aura_led_index] = aura_color.scale(LED_BRIGHTNESS);
     }
 
-    // Turn on the policy LEDs.
+    // Turn on the policy LEDs
     for policy in policy_leds {
         for led_index in policy {
-            led_colors[led_index] = liberal_color.scale(led_brightness);
+            led_colors[led_index] = liberal_color.scale(LED_BRIGHTNESS);
         }
-    }
-
-    // Turn on the election tracker LEDs
-    for election_tracker_led_index in election_tracker_leds {
-        led_colors[election_tracker_led_index] = election_tracker_color.scale(led_brightness);
     }
 
     leds_adapter.write(led_colors).await.unwrap();
