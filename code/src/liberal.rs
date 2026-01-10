@@ -4,6 +4,10 @@
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::{join::*, select::*};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    signal::{self, Signal},
+};
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::{
     mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_10X20},
@@ -13,6 +17,7 @@ use embedded_graphics::{
 };
 use esp_backtrace as _;
 use esp_hal::{
+    efuse::Efuse,
     gpio::{Input, InputConfig, Level, Pull},
     i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
@@ -28,7 +33,7 @@ use trouble_host::prelude::*;
 
 use lib::{
     CONNECTIONS_MAX, Debouncer, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, PSM_L2CAP_EXAMPLES,
-    RotaryEncoder, RotaryPinsState,
+    RotaryEncoder, RotaryPinsState, SERVICE_UUID,
 };
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, prelude::DisplayRotation, prelude::*,
@@ -207,7 +212,7 @@ async fn main(spawner: Spawner) {
 
             // Using a fixed "random" address can be useful for testing. In real scenarios, one would
             // use e.g. the MAC 6 byte array as the address (how to get that varies by the platform).
-            let address: Address = Address::random([0xff, 0x8f, 0x1b, 0x05, 0xe4, 0xff]);
+            let address: Address = Address::random(Efuse::mac_address());
             info!("Our address = {:?}", address);
 
             let mut resources: HostResources<
@@ -224,47 +229,95 @@ async fn main(spawner: Spawner) {
 
             // NOTE: Modify this to match the address of the peripheral you want to connect to.
             // Currently, it matches the address used by the peripheral examples
-            let target: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
+            // let target: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
 
             let config = ConnectConfig {
                 connect_params: Default::default(),
                 scan_config: ScanConfig {
-                    filter_accept_list: &[(target.kind, &target.addr)],
+                    // filter_accept_list: &[(target.kind, &target.addr)],
                     ..Default::default()
                 },
             };
 
             info!("Scanning for peripheral...");
-            let _ = join(runner.run(), async {
-                loop {
-                    let conn = central.connect(&config).await.unwrap();
-                    info!("Connected, creating l2cap channel");
-                    const PAYLOAD_LEN: usize = 27;
-                    let config = L2capChannelConfig {
-                        mtu: Some(PAYLOAD_LEN as u16),
-                        ..Default::default()
-                    };
-                    let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
+
+            let mut scanner = Scanner::new(central);
+            let signal = Signal::new();
+            struct MyEventHandler<'a> {
+                signal: &'a Signal<CriticalSectionRawMutex, Address>,
+            }
+            impl EventHandler for MyEventHandler<'_> {
+                fn on_adv_reports(&self, reports: LeAdvReportsIter) {
+                    if let Some(report) = reports.filter_map(Result::ok).find(|report| {
+                        AdStructure::decode(report.data).filter_map(Result::ok).any(
+                            |ad_structure| {
+                                if let AdStructure::ServiceUuids128(uuids) = ad_structure {
+                                    uuids.contains(SERVICE_UUID.as_raw().try_into().unwrap())
+                                } else {
+                                    false
+                                }
+                            },
+                        )
+                    }) {
+                        self.signal.signal(Address {
+                            addr: report.addr,
+                            kind: report.addr_kind,
+                        });
+                    }
+                    // for report in reports.filter_map(Result::ok) {
+                    //     for ad_structure in AdStructure::decode(report.data).filter_map(Result::ok)
+                    //     {
+                    //         info!("Ad: {}", ad_structure);
+                    //     }
+                    // }
+                }
+            }
+            let _ = join(
+                runner.run_with_handler(&MyEventHandler { signal: &signal }),
+                async {
+                    let session = scanner
+                        .scan(&ScanConfig {
+                            active: true,
+                            phys: PhySet::M1,
+                            interval: Duration::from_secs(1),
+                            window: Duration::from_secs(1),
+                            ..Default::default()
+                        })
                         .await
                         .unwrap();
-                    info!("New l2cap channel created, sending some data!");
-                    for i in 0..10 {
-                        let tx = [i; PAYLOAD_LEN];
-                        ch1.send(&stack, &tx).await.unwrap();
-                    }
-                    info!("Sent data, waiting for them to be sent back");
-                    let mut rx = [0; PAYLOAD_LEN];
-                    for i in 0..10 {
-                        let len = ch1.receive(&stack, &mut rx).await.unwrap();
-                        assert_eq!(len, rx.len());
-                        assert_eq!(rx, [i; PAYLOAD_LEN]);
-                    }
+                    let address = signal.wait().await;
+                    drop(session);
+                    info!("Found a fascist board: {}. Done scanning.", address);
+                    // loop {
+                    //     let conn = central.connect(&config).await.unwrap();
+                    //     info!("Connected, creating l2cap channel");
+                    //     const PAYLOAD_LEN: usize = 27;
+                    //     let config = L2capChannelConfig {
+                    //         mtu: Some(PAYLOAD_LEN as u16),
+                    //         ..Default::default()
+                    //     };
+                    //     let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
+                    //         .await
+                    //         .unwrap();
+                    //     info!("New l2cap channel created, sending some data!");
+                    //     for i in 0..10 {
+                    //         let tx = [i; PAYLOAD_LEN];
+                    //         ch1.send(&stack, &tx).await.unwrap();
+                    //     }
+                    //     info!("Sent data, waiting for them to be sent back");
+                    //     let mut rx = [0; PAYLOAD_LEN];
+                    //     for i in 0..10 {
+                    //         let len = ch1.receive(&stack, &mut rx).await.unwrap();
+                    //         assert_eq!(len, rx.len());
+                    //         assert_eq!(rx, [i; PAYLOAD_LEN]);
+                    //     }
 
-                    info!("Received successfully!");
+                    //     info!("Received successfully!");
 
-                    Timer::after(Duration::from_secs(60)).await;
-                }
-            })
+                    //     Timer::after(Duration::from_secs(60)).await;
+                    // }
+                },
+            )
             .await;
         },
     )

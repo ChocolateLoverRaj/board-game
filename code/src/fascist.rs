@@ -13,6 +13,7 @@ use embedded_graphics::{
 };
 use esp_backtrace as _;
 use esp_hal::{
+    efuse::Efuse,
     i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
     rmt::Rmt,
@@ -152,7 +153,7 @@ async fn main(spawner: Spawner) {
             let controller = ExternalController::<_, 20>::new(connector);
 
             // Hardcoded peripheral address
-            let address: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
+            let address: Address = Address::random(Efuse::mac_address());
             info!("Our address = {:?}", address);
 
             let mut resources: HostResources<
