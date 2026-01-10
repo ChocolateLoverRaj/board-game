@@ -1822,6 +1822,7 @@ dependencies = [
 name = "secret_hitler"
 version = "0.1.0"
 dependencies = [
+ "bt-hci",
  "defmt 1.0.1",
  "embassy-executor",
  "embassy-futures",

@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use defmt::info;
+use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::{join::*, select::*};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -318,7 +318,11 @@ async fn main(spawner: Spawner) {
                         info!("Connection event: {:#?}", event);
                         match event {
                             ConnectionEvent::Disconnected { reason } => {
-                                panic!("BLE connection disconnected. reason: {:?}", reason);
+                                if existing_bond_stored && reason == bt_hci::param::Status::AUTHENTICATION_FAILURE {
+                                    warn!("Could not connect with existing bond. We can delete it and create a new bond.");
+                                } else {
+                                    panic!("BLE connection disconnected. reason: {:?}", reason);
+                                }
                             }
                             ConnectionEvent::PairingComplete {
                                 security_level: _,

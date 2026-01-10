@@ -267,42 +267,23 @@ async fn main(spawner: Spawner) {
                     // To ask them if we should delete our saved bond and make a new one
                     // We don't have a way of prompting the user so we're not going to do that
                     conn.set_bondable(true).unwrap();
-                    let bond = match select(
+                    if let Ok(bond) = match select(
                         async {
                             loop {
-                            let event = conn.next().await;
-                            info!("Connection event: {:#?}", event);
-                            match event {
-                                ConnectionEvent::Disconnected { reason } => {
-                                    panic!("BLE connection disconnected. reason: {:?}", reason);
-                                }
-                                ConnectionEvent::PairingComplete {
-                                    security_level: _,
-                                    bond,
-                                } => {
-                                    break bond;
-                                }
-                                ConnectionEvent::PassKeyDisplay(_) => {
-                                    panic!(
-                                        "fascist board is DisplayOnly so unexpected PassKeyDisplay"
-                                    );
-                                }
-                                ConnectionEvent::PassKeyConfirm(_) => {
-                                    panic!(
-                                        "fascist board is DisplayOnly so unexpected PassKeyConfirm"
-                                    );
-                                }
-                                ConnectionEvent::PassKeyInput => {
-                                    panic!("this board is DisplayYesNo so unexpected PassKeyInput");
-                                }
-                                ConnectionEvent::PairingFailed(e) => {
-                                    panic!("pairing failed: {e:?}");
-                                }
-                                _ => {
-                                    panic!("unexpected connection event");
+                                let event = conn.next().await;
+                                info!("Connection event: {:#?}", event);
+                                match event {
+                                    ConnectionEvent::PairingComplete {
+                                        security_level: _,
+                                        bond,
+                                    } => {
+                                        break Ok(bond);
+                                    }
+                                    connection_event => {
+                                        break Err(connection_event);
+                                    }
                                 }
                             }
-                        }
                         },
                         async {
                             // See https://github.com/embassy-rs/trouble/issues/522
@@ -318,51 +299,57 @@ async fn main(spawner: Spawner) {
                             }
                         },
                     )
-                    .await {
+                    .await
+                    {
                         Either::First(bond) => bond,
-                        Either::Second(_) => None
-                    };
-                    info!("bonded: {}", bond);
-                    if let Some(bond) = bond {
-                        info!("storing bond");
-                        let MapStorageKeyValue { key, value } = MapStorageKeyValue::from(bond);
-                        map_storage
-                            .store_item(&mut [Default::default(); DATA_BUFFER_LEN], &key, &&value)
-                            .await
-                            .unwrap();
+                        Either::Second(_) => Ok(None),
+                    } {
+                        info!("bonded: {}", bond);
+                        if let Some(bond) = bond {
+                            info!("storing bond");
+                            let MapStorageKeyValue { key, value } = MapStorageKeyValue::from(bond);
+                            map_storage
+                                .store_item(
+                                    &mut [Default::default(); DATA_BUFFER_LEN],
+                                    &key,
+                                    &&value,
+                                )
+                                .await
+                                .unwrap();
+                        }
+
+                        info!("Connection established");
+
+                        let config = L2capChannelConfig {
+                            mtu: Some(PAYLOAD_LEN as u16),
+                            ..Default::default()
+                        };
+                        let mut ch1 =
+                            L2capChannel::accept(&stack, &conn, &[PSM_L2CAP_EXAMPLES], &config)
+                                .await
+                                .unwrap();
+
+                        info!("L2CAP channel accepted");
+
+                        // Size of payload we're expecting
+                        const PAYLOAD_LEN: usize = 27;
+                        let mut rx = [0; PAYLOAD_LEN];
+                        for i in 0..10 {
+                            let len = ch1.receive(&stack, &mut rx).await.unwrap();
+                            assert_eq!(len, rx.len());
+                            assert_eq!(rx, [i; PAYLOAD_LEN]);
+                        }
+
+                        info!("L2CAP data received, echoing");
+                        Timer::after(Duration::from_secs(1)).await;
+                        for i in 0..10 {
+                            let tx = [i; PAYLOAD_LEN];
+                            ch1.send(&stack, &tx).await.unwrap();
+                        }
+                        info!("L2CAP data echoed");
+
+                        Timer::after(Duration::from_secs(60)).await;
                     }
-
-                    info!("Connection established");
-
-                    let config = L2capChannelConfig {
-                        mtu: Some(PAYLOAD_LEN as u16),
-                        ..Default::default()
-                    };
-                    let mut ch1 =
-                        L2capChannel::accept(&stack, &conn, &[PSM_L2CAP_EXAMPLES], &config)
-                            .await
-                            .unwrap();
-
-                    info!("L2CAP channel accepted");
-
-                    // Size of payload we're expecting
-                    const PAYLOAD_LEN: usize = 27;
-                    let mut rx = [0; PAYLOAD_LEN];
-                    for i in 0..10 {
-                        let len = ch1.receive(&stack, &mut rx).await.unwrap();
-                        assert_eq!(len, rx.len());
-                        assert_eq!(rx, [i; PAYLOAD_LEN]);
-                    }
-
-                    info!("L2CAP data received, echoing");
-                    Timer::after(Duration::from_secs(1)).await;
-                    for i in 0..10 {
-                        let tx = [i; PAYLOAD_LEN];
-                        ch1.send(&stack, &tx).await.unwrap();
-                    }
-                    info!("L2CAP data echoed");
-
-                    Timer::after(Duration::from_secs(60)).await;
                 }
             })
             .await;
