@@ -19,6 +19,7 @@ use esp_hal::{
     i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
     rmt::Rmt,
+    rng::{Trng, TrngSource},
     time::Rate,
     timer::timg::TimerGroup,
 };
@@ -203,6 +204,8 @@ async fn main(spawner: Spawner) {
             }
         },
         async {
+            let _trng_source = TrngSource::new(p.RNG, p.ADC1);
+            let mut trng = Trng::try_new().unwrap();
             let radio = esp_radio::init().unwrap();
             let connector = BleConnector::new(&radio, p.BT, Default::default()).unwrap();
             let controller = ExternalController::<_, 20>::new(connector);
@@ -217,7 +220,10 @@ async fn main(spawner: Spawner) {
                 CONNECTIONS_MAX,
                 L2CAP_CHANNELS_MAX,
             > = HostResources::new();
-            let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
+            let stack = trouble_host::new(controller, &mut resources)
+                .set_random_address(address)
+                .set_random_generator_seed(&mut trng)
+                .set_io_capabilities(IoCapabilities::DisplayYesNo);
             let Host {
                 mut central,
                 mut runner,
@@ -227,14 +233,6 @@ async fn main(spawner: Spawner) {
             // NOTE: Modify this to match the address of the peripheral you want to connect to.
             // Currently, it matches the address used by the peripheral examples
             // let target: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
-
-            let config = ConnectConfig {
-                connect_params: Default::default(),
-                scan_config: ScanConfig {
-                    // filter_accept_list: &[(target.kind, &target.addr)],
-                    ..Default::default()
-                },
-            };
 
             info!("Scanning for peripheral...");
 
@@ -261,12 +259,6 @@ async fn main(spawner: Spawner) {
                             kind: report.addr_kind,
                         });
                     }
-                    // for report in reports.filter_map(Result::ok) {
-                    //     for ad_structure in AdStructure::decode(report.data).filter_map(Result::ok)
-                    //     {
-                    //         info!("Ad: {}", ad_structure);
-                    //     }
-                    // }
                 }
             }
             let _ = join(
@@ -285,34 +277,97 @@ async fn main(spawner: Spawner) {
                     let address = signal.wait().await;
                     drop(session);
                     info!("Found a fascist board: {}. Done scanning.", address);
-                    // loop {
-                    //     let conn = central.connect(&config).await.unwrap();
-                    //     info!("Connected, creating l2cap channel");
-                    //     const PAYLOAD_LEN: usize = 27;
-                    //     let config = L2capChannelConfig {
-                    //         mtu: Some(PAYLOAD_LEN as u16),
-                    //         ..Default::default()
-                    //     };
-                    //     let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
-                    //         .await
-                    //         .unwrap();
-                    //     info!("New l2cap channel created, sending some data!");
-                    //     for i in 0..10 {
-                    //         let tx = [i; PAYLOAD_LEN];
-                    //         ch1.send(&stack, &tx).await.unwrap();
-                    //     }
-                    //     info!("Sent data, waiting for them to be sent back");
-                    //     let mut rx = [0; PAYLOAD_LEN];
-                    //     for i in 0..10 {
-                    //         let len = ch1.receive(&stack, &mut rx).await.unwrap();
-                    //         assert_eq!(len, rx.len());
-                    //         assert_eq!(rx, [i; PAYLOAD_LEN]);
-                    //     }
+                    let mut central = scanner.into_inner();
+                    let conn = central
+                        .connect(&ConnectConfig {
+                            connect_params: Default::default(),
+                            scan_config: ScanConfig {
+                                filter_accept_list: &[(address.kind, &address.addr)],
+                                ..Default::default()
+                            },
+                        })
+                        .await
+                        .unwrap();
+                    conn.set_bondable(true).unwrap();
+                    conn.request_security().unwrap();
+                    let bond = loop {
+                        let event = conn.next().await;
+                        info!("Connection event: {:#?}", event);
+                        match event {
+                            ConnectionEvent::Disconnected { reason } => {
+                                panic!("BLE connection disconnected. reason: {:?}", reason);
+                            }
+                            ConnectionEvent::ConnectionParamsUpdated {
+                                conn_interval,
+                                peripheral_latency,
+                                supervision_timeout,
+                            } => {
+                                panic!("unexpected connection event");
+                            }
+                            ConnectionEvent::DataLengthUpdated {
+                                max_tx_octets,
+                                max_tx_time,
+                                max_rx_octets,
+                                max_rx_time,
+                            } => {
+                                panic!("unexpected connection event");
+                            }
+                            ConnectionEvent::RequestConnectionParams {
+                                min_connection_interval,
+                                max_connection_interval,
+                                max_latency,
+                                supervision_timeout,
+                            } => {
+                                panic!("unexpected connection event");
+                            }
+                            ConnectionEvent::PairingComplete {
+                                security_level,
+                                bond,
+                            } => {
+                                break bond;
+                            }
+                            ConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
+                                panic!("unexpected connection event");
+                            }
+                            ConnectionEvent::PassKeyDisplay(_) => {
+                                panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
+                            }
+                            ConnectionEvent::PassKeyConfirm(_) => {
+                                panic!("fascist board is DisplayOnly so unexpected PassKeyConfirm");
+                            }
+                            ConnectionEvent::PassKeyInput => {
+                                panic!("this board is DisplayYesNo so unexpected PassKeyInput");
+                            }
+                            ConnectionEvent::PairingFailed(e) => {
+                                panic!("pairing failed: {e:?}");
+                            }
+                        }
+                    };
+                    info!("Bonded: {:?}", bond);
 
-                    //     info!("Received successfully!");
+                    info!("Connected, creating l2cap channel");
+                    const PAYLOAD_LEN: usize = 27;
+                    let config = L2capChannelConfig {
+                        mtu: Some(PAYLOAD_LEN as u16),
+                        ..Default::default()
+                    };
+                    let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
+                        .await
+                        .unwrap();
+                    info!("New l2cap channel created, sending some data!");
+                    for i in 0..10 {
+                        let tx = [i; PAYLOAD_LEN];
+                        ch1.send(&stack, &tx).await.unwrap();
+                    }
+                    info!("Sent data, waiting for them to be sent back");
+                    let mut rx = [0; PAYLOAD_LEN];
+                    for i in 0..10 {
+                        let len = ch1.receive(&stack, &mut rx).await.unwrap();
+                        assert_eq!(len, rx.len());
+                        assert_eq!(rx, [i; PAYLOAD_LEN]);
+                    }
 
-                    //     Timer::after(Duration::from_secs(60)).await;
-                    // }
+                    info!("Received successfully!");
                 },
             )
             .await;

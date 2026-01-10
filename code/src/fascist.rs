@@ -19,6 +19,7 @@ use esp_hal::{
     i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
     rmt::Rmt,
+    rng::{Trng, TrngSource},
     time::Rate,
     timer::timg::TimerGroup,
 };
@@ -180,6 +181,8 @@ async fn main(spawner: Spawner) {
             }
         },
         async {
+            let _trng_source = TrngSource::new(p.RNG, p.ADC1);
+            let mut trng = Trng::try_new().unwrap();
             let radio = esp_radio::init().unwrap();
             let connector = BleConnector::new(&radio, p.BT, Default::default()).unwrap();
             let controller = ExternalController::<_, 20>::new(connector);
@@ -192,7 +195,14 @@ async fn main(spawner: Spawner) {
                 CONNECTIONS_MAX,
                 L2CAP_CHANNELS_MAX,
             > = HostResources::new();
-            let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
+            // Because we have no buttons for yes/no on the fascist board (to confirm the pairing  pin),
+            // The JustWorks pairing method will be used.
+            // This method is susceptible to man in the middle attacks.
+            // This risk is okay because this is just a game.
+            let stack = trouble_host::new(controller, &mut resources)
+                .set_random_address(address)
+                .set_random_generator_seed(&mut trng)
+                .set_io_capabilities(IoCapabilities::DisplayOnly);
             let Host {
                 mut peripheral,
                 mut runner,
@@ -232,6 +242,62 @@ async fn main(spawner: Spawner) {
                         .await
                         .unwrap();
                     let conn = advertiser.accept().await.unwrap();
+                    conn.set_bondable(true).unwrap();
+                    conn.request_security().unwrap();
+                    let bond = loop {
+                        let event = conn.next().await;
+                        info!("Connection event: {:#?}", event);
+                        match event {
+                            ConnectionEvent::Disconnected { reason } => {
+                                panic!("BLE connection disconnected. reason: {:?}", reason);
+                            }
+                            ConnectionEvent::ConnectionParamsUpdated {
+                                conn_interval,
+                                peripheral_latency,
+                                supervision_timeout,
+                            } => {
+                                panic!("unexpected connection event");
+                            }
+                            ConnectionEvent::DataLengthUpdated {
+                                max_tx_octets,
+                                max_tx_time,
+                                max_rx_octets,
+                                max_rx_time,
+                            } => {
+                                panic!("unexpected connection event");
+                            }
+                            ConnectionEvent::RequestConnectionParams {
+                                min_connection_interval,
+                                max_connection_interval,
+                                max_latency,
+                                supervision_timeout,
+                            } => {
+                                panic!("unexpected connection event");
+                            }
+                            ConnectionEvent::PairingComplete {
+                                security_level,
+                                bond,
+                            } => {
+                                break bond;
+                            }
+                            ConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
+                                panic!("unexpected connection event");
+                            }
+                            ConnectionEvent::PassKeyDisplay(_) => {
+                                panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
+                            }
+                            ConnectionEvent::PassKeyConfirm(_) => {
+                                panic!("fascist board is DisplayOnly so unexpected PassKeyConfirm");
+                            }
+                            ConnectionEvent::PassKeyInput => {
+                                panic!("this board is DisplayYesNo so unexpected PassKeyInput");
+                            }
+                            ConnectionEvent::PairingFailed(e) => {
+                                panic!("pairing failed: {e:?}");
+                            }
+                        }
+                    };
+                    info!("Bonded: {:?}", bond);
 
                     info!("Connection established");
 
