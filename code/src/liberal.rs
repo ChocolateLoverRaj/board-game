@@ -40,7 +40,7 @@ use trouble_host::prelude::*;
 use lib::{
     CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
     LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, RotaryEncoder,
-    RotaryPinsState, SERVICE_UUID,
+    RotaryPinsState, SERVICE_UUID, ScaleRgb,
 };
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, prelude::DisplayRotation, prelude::*,
@@ -48,21 +48,6 @@ use ssd1306::{
 };
 
 esp_bootloader_esp_idf::esp_app_desc!();
-
-trait ScaleRgb {
-    fn scale(self, factor: f64) -> Self;
-}
-
-impl ScaleRgb for RGB8 {
-    fn scale(self, factor: f64) -> Self {
-        let Self { r, g, b } = self;
-        Self::new(
-            (r as f64 * factor) as u8,
-            (g as f64 * factor) as u8,
-            (b as f64 * factor) as u8,
-        )
-    }
-}
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {

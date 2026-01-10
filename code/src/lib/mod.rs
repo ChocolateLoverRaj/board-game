@@ -3,11 +3,13 @@ mod debouncer;
 mod embedded_storage_async_wrapper;
 mod map_storage;
 mod rotary_encoder;
+mod scale_rgb;
 
 pub use debouncer::*;
 pub use embedded_storage_async_wrapper::*;
 pub use map_storage::*;
 pub use rotary_encoder::*;
+pub use scale_rgb::*;
 use trouble_host::prelude::{Uuid, uuid};
 
 pub const LED_BRIGHTNESS: f64 = 0.05;

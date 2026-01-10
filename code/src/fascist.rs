@@ -32,7 +32,7 @@ use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
 use lib::{
     CONNECTIONS_MAX, DATA_BUFFER_LEN, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
-    LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, SERVICE_UUID,
+    LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, SERVICE_UUID, ScaleRgb,
 };
 use sequential_storage::{
     cache::NoCache,
@@ -46,21 +46,6 @@ use ssd1306::{
 use trouble_host::prelude::*;
 
 esp_bootloader_esp_idf::esp_app_desc!();
-
-trait ScaleRgb {
-    fn scale(self, factor: f64) -> Self;
-}
-
-impl ScaleRgb for RGB8 {
-    fn scale(self, factor: f64) -> Self {
-        let Self { r, g, b } = self;
-        Self::new(
-            (r as f64 * factor) as u8,
-            (g as f64 * factor) as u8,
-            (b as f64 * factor) as u8,
-        )
-    }
-}
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
