@@ -1298,6 +1298,7 @@ version = "0.1.0"
 dependencies = [
  "defmt 1.0.1",
  "embassy-executor",
+ "embassy-futures",
  "embassy-time",
  "embedded-graphics",
  "esp-backtrace",
