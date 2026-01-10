@@ -40,6 +40,7 @@ esp-hal-smartled = { version = "0.17.0", features = ["defmt"] }
 esp-println = { version = "0.16.1", features = ["defmt-espflash"] }
 esp-radio = { version = "0.17.0", features = ["ble", "defmt", "unstable"] }
 esp-rtos = { version = "0.2.0", features = ["defmt", "embassy", "esp-alloc", "esp-radio"] }
+heapless = { version = "0.9.2", features = ["defmt"] }
 smart-leds = "0.4.0"
 ssd1306 = { version = "0.10.0", features = ["async"] }
 trouble-host = { version = "0.5.1", features = ["defmt", "scan"] }

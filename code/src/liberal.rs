@@ -4,10 +4,7 @@
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::{join::*, select::*};
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    signal::{self, Signal},
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::{
     mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_10X20},

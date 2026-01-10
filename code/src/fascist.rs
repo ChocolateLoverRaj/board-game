@@ -1,15 +1,17 @@
 #![no_std]
 #![no_main]
 
+use core::fmt::Write;
+
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 use embedded_graphics::{
-    mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_10X20},
+    mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_7X14},
     pixelcolor::BinaryColor,
     prelude::*,
-    text::{Baseline, Text},
+    text::{Baseline, Text, renderer::TextRenderer},
 };
 use esp_backtrace as _;
 use esp_hal::{
@@ -112,6 +114,8 @@ async fn main(spawner: Spawner) {
 
     leds_adapter.write(led_colors).await.unwrap();
 
+    let address: Address = Address::random(Efuse::mac_address());
+
     join(
         async {
             // Turn on the OLED display
@@ -131,21 +135,49 @@ async fn main(spawner: Spawner) {
             .into_buffered_graphics_mode();
             display.init().await.unwrap();
             let text_style = MonoTextStyleBuilder::new()
-                .font(&FONT_10X20)
+                .font(&FONT_7X14)
                 .text_color(BinaryColor::On)
                 .build();
-            Text::with_baseline(
-                "Secret Hitler\nFascist Board",
-                Point::zero(),
-                text_style,
-                Baseline::Top,
-            )
-            .draw(&mut display)
-            .unwrap();
+            struct DrawWriter<'a, D, S> {
+                display: &'a mut D,
+                position: Point,
+                character_style: S,
+            }
+            impl<'a, D, S> DrawWriter<'a, D, S> {
+                pub fn new(display: &'a mut D, position: Point, character_style: S) -> Self {
+                    Self {
+                        display,
+                        position,
+                        character_style,
+                    }
+                }
+            }
+            impl<D, S: TextRenderer + Clone> Write for DrawWriter<'_, D, S>
+            where
+                D: DrawTarget<Color = S::Color>,
+            {
+                fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                    self.position = Text::with_baseline(
+                        s,
+                        self.position,
+                        self.character_style.clone(),
+                        Baseline::Top,
+                    )
+                    .draw(self.display)
+                    .map_err(|_| core::fmt::Error)?;
+                    Ok(())
+                }
+            }
+            let mut writer = DrawWriter::new(&mut display, Point::zero(), text_style);
+            write!(writer, "{address}").unwrap();
             display.flush().await.unwrap();
-            // Turn off the display to not cause burn-in
-            Timer::after_secs(5).await;
-            display.set_display_on(false).await.unwrap();
+            // Invert the display ocassionally to not cause burn-in
+            let mut invert = false;
+            loop {
+                Timer::after(Duration::from_secs(60)).await;
+                invert = !invert;
+                display.set_invert(invert).await.unwrap();
+            }
         },
         async {
             let radio = esp_radio::init().unwrap();
@@ -153,7 +185,6 @@ async fn main(spawner: Spawner) {
             let controller = ExternalController::<_, 20>::new(connector);
 
             // Hardcoded peripheral address
-            let address: Address = Address::random(Efuse::mac_address());
             info!("Our address = {:?}", address);
 
             let mut resources: HostResources<
