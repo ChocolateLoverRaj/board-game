@@ -22,9 +22,14 @@ use esp_hal::{
 };
 use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffer};
 use esp_println as _;
+use esp_radio::ble::controller::BleConnector;
 use smart_leds::{RGB8, SmartLedsWriteAsync};
+use trouble_host::prelude::*;
 
-use lib::{Debouncer, LED_BRIGHTNESS, RotaryEncoder, RotaryPinsState};
+use lib::{
+    CONNECTIONS_MAX, Debouncer, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, PSM_L2CAP_EXAMPLES,
+    RotaryEncoder, RotaryPinsState,
+};
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, prelude::DisplayRotation, prelude::*,
     size::DisplaySize128x64,
@@ -52,7 +57,7 @@ async fn main(spawner: Spawner) {
     let _ = spawner;
 
     let p = esp_hal::init(Default::default());
-
+    esp_alloc::heap_allocator!(size: 72 * 1024);
     // Needed for esp_rtos
     let timg0 = TimerGroup::new(p.TIMG0);
     let software_interrupt = SoftwareInterruptControl::new(p.SW_INTERRUPT);
@@ -121,7 +126,7 @@ async fn main(spawner: Spawner) {
 
     leds_adapter.write(led_colors).await.unwrap();
 
-    join3(
+    join4(
         async {
             // Turn on the OLED display
             let i2c = I2c::new(
@@ -194,6 +199,73 @@ async fn main(spawner: Spawner) {
                     info!("rotary direction: {}", direction);
                 }
             }
+        },
+        async {
+            let radio = esp_radio::init().unwrap();
+            let connector = BleConnector::new(&radio, p.BT, Default::default()).unwrap();
+            let controller = ExternalController::<_, 20>::new(connector);
+
+            // Using a fixed "random" address can be useful for testing. In real scenarios, one would
+            // use e.g. the MAC 6 byte array as the address (how to get that varies by the platform).
+            let address: Address = Address::random([0xff, 0x8f, 0x1b, 0x05, 0xe4, 0xff]);
+            info!("Our address = {:?}", address);
+
+            let mut resources: HostResources<
+                DefaultPacketPool,
+                CONNECTIONS_MAX,
+                L2CAP_CHANNELS_MAX,
+            > = HostResources::new();
+            let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
+            let Host {
+                mut central,
+                mut runner,
+                ..
+            } = stack.build();
+
+            // NOTE: Modify this to match the address of the peripheral you want to connect to.
+            // Currently, it matches the address used by the peripheral examples
+            let target: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
+
+            let config = ConnectConfig {
+                connect_params: Default::default(),
+                scan_config: ScanConfig {
+                    filter_accept_list: &[(target.kind, &target.addr)],
+                    ..Default::default()
+                },
+            };
+
+            info!("Scanning for peripheral...");
+            let _ = join(runner.run(), async {
+                loop {
+                    let conn = central.connect(&config).await.unwrap();
+                    info!("Connected, creating l2cap channel");
+                    const PAYLOAD_LEN: usize = 27;
+                    let config = L2capChannelConfig {
+                        mtu: Some(PAYLOAD_LEN as u16),
+                        ..Default::default()
+                    };
+                    let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
+                        .await
+                        .unwrap();
+                    info!("New l2cap channel created, sending some data!");
+                    for i in 0..10 {
+                        let tx = [i; PAYLOAD_LEN];
+                        ch1.send(&stack, &tx).await.unwrap();
+                    }
+                    info!("Sent data, waiting for them to be sent back");
+                    let mut rx = [0; PAYLOAD_LEN];
+                    for i in 0..10 {
+                        let len = ch1.receive(&stack, &mut rx).await.unwrap();
+                        assert_eq!(len, rx.len());
+                        assert_eq!(rx, [i; PAYLOAD_LEN]);
+                    }
+
+                    info!("Received successfully!");
+
+                    Timer::after(Duration::from_secs(60)).await;
+                }
+            })
+            .await;
         },
     )
     .await;
