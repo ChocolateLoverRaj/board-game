@@ -1,8 +1,12 @@
 #![no_std]
 mod debouncer;
+mod embedded_storage_async_wrapper;
+mod map_storage;
 mod rotary_encoder;
 
 pub use debouncer::*;
+pub use embedded_storage_async_wrapper::*;
+pub use map_storage::*;
 pub use rotary_encoder::*;
 use trouble_host::prelude::{Uuid, uuid};
 

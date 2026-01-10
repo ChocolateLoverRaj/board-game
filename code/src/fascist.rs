@@ -5,7 +5,7 @@ use core::fmt::Write;
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
+use embassy_futures::{join::*, select::*};
 use embassy_time::{Duration, Timer};
 use embedded_graphics::{
     mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_7X14},
@@ -14,6 +14,9 @@ use embedded_graphics::{
     text::{Baseline, Text, renderer::TextRenderer},
 };
 use esp_backtrace as _;
+use esp_bootloader_esp_idf::partitions::{
+    DataPartitionSubType, PARTITION_TABLE_MAX_LEN, PartitionType, read_partition_table,
+};
 use esp_hal::{
     efuse::Efuse,
     i2c::{self, master::I2c},
@@ -26,7 +29,15 @@ use esp_hal::{
 use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffer};
 use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
-use lib::{CONNECTIONS_MAX, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, PSM_L2CAP_EXAMPLES, SERVICE_UUID};
+use esp_storage::FlashStorage;
+use lib::{
+    CONNECTIONS_MAX, DATA_BUFFER_LEN, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
+    LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, SERVICE_UUID,
+};
+use sequential_storage::{
+    cache::NoCache,
+    map::{MapConfig, MapStorage},
+};
 use smart_leds::{RGB8, SmartLedsWriteAsync};
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, prelude::DisplayRotation, prelude::*,
@@ -181,6 +192,21 @@ async fn main(spawner: Spawner) {
             }
         },
         async {
+            let mut flash = FlashStorage::new(p.FLASH);
+            let mut pt_mem = [0; PARTITION_TABLE_MAX_LEN];
+            let pt = read_partition_table(&mut flash, &mut pt_mem).unwrap();
+            let nvs = pt
+                .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))
+                .unwrap()
+                .unwrap();
+            let nvs_partition = nvs.as_embedded_storage(&mut flash);
+            let map_config = MapConfig::new(0..nvs_partition.partition_size() as u32);
+            let mut map_storage = MapStorage::<MapStorageKey, _, _>::new(
+                EmbeddedStorageAsyncWrapper(nvs_partition),
+                map_config,
+                NoCache::new(),
+            );
+
             let _trng_source = TrngSource::new(p.RNG, p.ADC1);
             let mut trng = Trng::try_new().unwrap();
             let radio = esp_radio::init().unwrap();
@@ -203,6 +229,15 @@ async fn main(spawner: Spawner) {
                 .set_random_address(address)
                 .set_random_generator_seed(&mut trng)
                 .set_io_capabilities(IoCapabilities::DisplayOnly);
+
+            let mut data_buffer = [Default::default(); DATA_BUFFER_LEN];
+            let mut iter = map_storage.fetch_all_items(&mut data_buffer).await.unwrap();
+            while let Some((key, &value)) = iter.next(&mut data_buffer).await.unwrap() {
+                let bond = MapStorageKeyValue { key, value }.into();
+                info!("found existing bond: {:#?}", bond);
+                stack.add_bond_information(bond).unwrap();
+            }
+
             let Host {
                 mut peripheral,
                 mut runner,
@@ -242,62 +277,75 @@ async fn main(spawner: Spawner) {
                         .await
                         .unwrap();
                     let conn = advertiser.accept().await.unwrap();
+                    // If we set this to false, we can require the previously created bond to be used
+                    // However, if the central deleted its saved bond, we would need a way to prompt the user
+                    // To ask them if we should delete our saved bond and make a new one
+                    // We don't have a way of prompting the user so we're not going to do that
                     conn.set_bondable(true).unwrap();
-                    conn.request_security().unwrap();
-                    let bond = loop {
-                        let event = conn.next().await;
-                        info!("Connection event: {:#?}", event);
-                        match event {
-                            ConnectionEvent::Disconnected { reason } => {
-                                panic!("BLE connection disconnected. reason: {:?}", reason);
-                            }
-                            ConnectionEvent::ConnectionParamsUpdated {
-                                conn_interval,
-                                peripheral_latency,
-                                supervision_timeout,
-                            } => {
-                                panic!("unexpected connection event");
-                            }
-                            ConnectionEvent::DataLengthUpdated {
-                                max_tx_octets,
-                                max_tx_time,
-                                max_rx_octets,
-                                max_rx_time,
-                            } => {
-                                panic!("unexpected connection event");
-                            }
-                            ConnectionEvent::RequestConnectionParams {
-                                min_connection_interval,
-                                max_connection_interval,
-                                max_latency,
-                                supervision_timeout,
-                            } => {
-                                panic!("unexpected connection event");
-                            }
-                            ConnectionEvent::PairingComplete {
-                                security_level,
-                                bond,
-                            } => {
-                                break bond;
-                            }
-                            ConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
-                                panic!("unexpected connection event");
-                            }
-                            ConnectionEvent::PassKeyDisplay(_) => {
-                                panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
-                            }
-                            ConnectionEvent::PassKeyConfirm(_) => {
-                                panic!("fascist board is DisplayOnly so unexpected PassKeyConfirm");
-                            }
-                            ConnectionEvent::PassKeyInput => {
-                                panic!("this board is DisplayYesNo so unexpected PassKeyInput");
-                            }
-                            ConnectionEvent::PairingFailed(e) => {
-                                panic!("pairing failed: {e:?}");
+                    let bond = match select(
+                        async {
+                            loop {
+                            let event = conn.next().await;
+                            info!("Connection event: {:#?}", event);
+                            match event {
+                                ConnectionEvent::Disconnected { reason } => {
+                                    panic!("BLE connection disconnected. reason: {:?}", reason);
+                                }
+                                ConnectionEvent::PairingComplete {
+                                    security_level: _,
+                                    bond,
+                                } => {
+                                    break bond;
+                                }
+                                ConnectionEvent::PassKeyDisplay(_) => {
+                                    panic!(
+                                        "fascist board is DisplayOnly so unexpected PassKeyDisplay"
+                                    );
+                                }
+                                ConnectionEvent::PassKeyConfirm(_) => {
+                                    panic!(
+                                        "fascist board is DisplayOnly so unexpected PassKeyConfirm"
+                                    );
+                                }
+                                ConnectionEvent::PassKeyInput => {
+                                    panic!("this board is DisplayYesNo so unexpected PassKeyInput");
+                                }
+                                ConnectionEvent::PairingFailed(e) => {
+                                    panic!("pairing failed: {e:?}");
+                                }
+                                _ => {
+                                    panic!("unexpected connection event");
+                                }
                             }
                         }
+                        },
+                        async {
+                            // See https://github.com/embassy-rs/trouble/issues/522
+                            loop {
+                                if matches!(
+                                    conn.security_level().unwrap(),
+                                    SecurityLevel::Encrypted
+                                        | SecurityLevel::EncryptedAuthenticated
+                                ) {
+                                    break;
+                                }
+                                Timer::after(Duration::from_millis(100)).await;
+                            }
+                        },
+                    )
+                    .await {
+                        Either::First(bond) => bond,
+                        Either::Second(_) => None
                     };
-                    info!("Bonded: {:?}", bond);
+                    info!("bonded: {}", bond);
+                    if let Some(bond) = bond {
+                        info!("storing bond");
+                        let MapStorageKeyValue { key, value } = MapStorageKeyValue::from(bond);
+                        map_storage
+                            .store_item(&mut [Default::default(); DATA_BUFFER_LEN], &key, &&value)
+                            .await
+                            .unwrap();
+                    }
 
                     info!("Connection established");
 

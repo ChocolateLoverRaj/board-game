@@ -13,6 +13,9 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 use esp_backtrace as _;
+use esp_bootloader_esp_idf::partitions::{
+    DataPartitionSubType, PARTITION_TABLE_MAX_LEN, PartitionType, read_partition_table,
+};
 use esp_hal::{
     efuse::Efuse,
     gpio::{Input, InputConfig, Level, Pull},
@@ -26,12 +29,18 @@ use esp_hal::{
 use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffer};
 use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
+use esp_storage::FlashStorage;
+use sequential_storage::{
+    cache::NoCache,
+    map::{MapConfig, MapStorage},
+};
 use smart_leds::{RGB8, SmartLedsWriteAsync};
 use trouble_host::prelude::*;
 
 use lib::{
-    CONNECTIONS_MAX, Debouncer, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, PSM_L2CAP_EXAMPLES,
-    RotaryEncoder, RotaryPinsState, SERVICE_UUID,
+    CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
+    LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, RotaryEncoder,
+    RotaryPinsState, SERVICE_UUID,
 };
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, prelude::DisplayRotation, prelude::*,
@@ -204,6 +213,21 @@ async fn main(spawner: Spawner) {
             }
         },
         async {
+            let mut flash = FlashStorage::new(p.FLASH);
+            let mut pt_mem = [0; PARTITION_TABLE_MAX_LEN];
+            let pt = read_partition_table(&mut flash, &mut pt_mem).unwrap();
+            let nvs = pt
+                .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))
+                .unwrap()
+                .unwrap();
+            let nvs_partition = nvs.as_embedded_storage(&mut flash);
+            let map_config = MapConfig::new(0..nvs_partition.partition_size() as u32);
+            let mut map_storage = MapStorage::<MapStorageKey, _, _>::new(
+                EmbeddedStorageAsyncWrapper(nvs_partition),
+                map_config,
+                NoCache::new(),
+            );
+
             let _trng_source = TrngSource::new(p.RNG, p.ADC1);
             let mut trng = Trng::try_new().unwrap();
             let radio = esp_radio::init().unwrap();
@@ -224,8 +248,17 @@ async fn main(spawner: Spawner) {
                 .set_random_address(address)
                 .set_random_generator_seed(&mut trng)
                 .set_io_capabilities(IoCapabilities::DisplayYesNo);
+
+            let mut data_buffer = [Default::default(); DATA_BUFFER_LEN];
+            let mut iter = map_storage.fetch_all_items(&mut data_buffer).await.unwrap();
+            while let Some((key, &value)) = iter.next(&mut data_buffer).await.unwrap() {
+                let bond = MapStorageKeyValue { key, value }.into();
+                info!("found existing bond: {:#?}", bond);
+                stack.add_bond_information(bond).unwrap();
+            }
+
             let Host {
-                mut central,
+                central,
                 mut runner,
                 ..
             } = stack.build();
@@ -288,7 +321,12 @@ async fn main(spawner: Spawner) {
                         })
                         .await
                         .unwrap();
-                    conn.set_bondable(true).unwrap();
+                    // Only allow creating a new bond if we haven't connected to this peripheral before
+                    let existing_bond_stored = stack
+                        .get_bond_information()
+                        .iter()
+                        .any(|bond| bond.identity == conn.peer_identity());
+                    conn.set_bondable(!existing_bond_stored).unwrap();
                     conn.request_security().unwrap();
                     let bond = loop {
                         let event = conn.next().await;
@@ -297,37 +335,11 @@ async fn main(spawner: Spawner) {
                             ConnectionEvent::Disconnected { reason } => {
                                 panic!("BLE connection disconnected. reason: {:?}", reason);
                             }
-                            ConnectionEvent::ConnectionParamsUpdated {
-                                conn_interval,
-                                peripheral_latency,
-                                supervision_timeout,
-                            } => {
-                                panic!("unexpected connection event");
-                            }
-                            ConnectionEvent::DataLengthUpdated {
-                                max_tx_octets,
-                                max_tx_time,
-                                max_rx_octets,
-                                max_rx_time,
-                            } => {
-                                panic!("unexpected connection event");
-                            }
-                            ConnectionEvent::RequestConnectionParams {
-                                min_connection_interval,
-                                max_connection_interval,
-                                max_latency,
-                                supervision_timeout,
-                            } => {
-                                panic!("unexpected connection event");
-                            }
                             ConnectionEvent::PairingComplete {
-                                security_level,
+                                security_level: _,
                                 bond,
                             } => {
                                 break bond;
-                            }
-                            ConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
-                                panic!("unexpected connection event");
                             }
                             ConnectionEvent::PassKeyDisplay(_) => {
                                 panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
@@ -341,9 +353,20 @@ async fn main(spawner: Spawner) {
                             ConnectionEvent::PairingFailed(e) => {
                                 panic!("pairing failed: {e:?}");
                             }
+                            _ => {
+                                panic!("unexpected connection event");
+                            }
                         }
                     };
-                    info!("Bonded: {:?}", bond);
+                    info!("bonded: {}", bond);
+                    if !existing_bond_stored && let Some(bond) = bond {
+                        info!("storing bond");
+                        let MapStorageKeyValue { key, value } = MapStorageKeyValue::from(bond);
+                        map_storage
+                            .store_item(&mut [Default::default(); DATA_BUFFER_LEN], &key, &&value)
+                            .await
+                            .unwrap();
+                    }
 
                     info!("Connected, creating l2cap channel");
                     const PAYLOAD_LEN: usize = 27;
