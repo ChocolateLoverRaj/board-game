@@ -96,9 +96,9 @@ pub enum ReuseSavedBondErrorOptions {
     Retry,
 }
 
-#[derive(Debug, Format, Default)]
+#[derive(Debug, Format)]
 pub struct ConnectingUiState {
-    pub address: BdAddr,
+    pub address: Address,
     pub is_auto: bool,
 }
 
@@ -134,7 +134,7 @@ async fn render_ui(display: &mut D<'_>, ui_state: UiState) {
         }
         UiState::Connecting(ConnectingUiState { address, is_auto }) => {
             TextElement {
-                text: format_args!("Connecting to {address:?}\nIs automatic? {is_auto}"),
+                text: format_args!("Connecting to {address}\nIs automatic? {is_auto}"),
                 character_style: MonoTextStyleBuilder::new()
                     .font(FONT)
                     .text_color(BinaryColor::On)

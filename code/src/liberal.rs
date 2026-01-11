@@ -14,7 +14,7 @@ use esp_bootloader_esp_idf::partitions::{
 };
 use esp_hal::{
     efuse::Efuse,
-    gpio::{Input, InputConfig, Pull},
+    gpio::{Input, InputConfig, Level, Pull},
     interrupt::software::SoftwareInterruptControl,
     rmt::Rmt,
     rng::{Trng, TrngSource},
@@ -119,20 +119,8 @@ async fn main(spawner: Spawner) {
     join4(
         render_display(p.I2C0, i2c_scl_gpio, i2c_sda_gpio, &signal),
         async {},
+        async {},
         async {
-            let mut switch = Input::new(rotary_sw_gpio, InputConfig::default().with_pull(Pull::Up));
-            let mut debouncer = Debouncer::new(switch.level(), Duration::from_millis(1));
-            loop {
-                select(switch.wait_for_any_edge(), debouncer.wait()).await;
-                let level_changed = debouncer.process_data(switch.level(), Instant::now());
-                if level_changed {
-                    info!("rotary button level: {}", debouncer.value());
-                }
-            }
-        },
-        async {
-            let mut ui_state = UiState::default();
-
             let mut flash = FlashStorage::new(p.FLASH);
             let mut pt_mem = [0; PARTITION_TABLE_MAX_LEN];
             let pt = read_partition_table(&mut flash, &mut pt_mem).unwrap();
@@ -194,11 +182,13 @@ async fn main(spawner: Spawner) {
             if let Some(last_connected_peripheral) = &stored_data.last_connected_peripheral {
                 let _ = join(runner.run(), async {
                     let address = BdAddr::new(*last_connected_peripheral);
-                    ui_state = UiState::Connecting(ConnectingUiState {
-                        address,
+                    signal.signal(UiState::Connecting(ConnectingUiState {
+                        address: Address {
+                            kind: AddrKind::RANDOM,
+                            addr: address,
+                        },
                         is_auto: true,
-                    });
-                    signal.signal(ui_state);
+                    }));
                     let _connection = central
                         .connect(&ConnectConfig {
                             connect_params: Default::default(),
@@ -209,14 +199,11 @@ async fn main(spawner: Spawner) {
                         })
                         .await
                         .unwrap();
-                    ui_state = UiState::Connected(address);
-                    signal.signal(ui_state);
+                    signal.signal(UiState::Connected(address));
                     core::future::pending::<()>().await;
                 })
                 .await;
             } else {
-                let mut scanning_state = ScanningState::default();
-                signal.signal(UiState::Scanning(scanning_state.clone()));
                 let channel = Channel::new();
                 struct MyEventHandler<'a> {
                     channel: &'a Channel<CriticalSectionRawMutex, Address, 1>,
@@ -243,9 +230,11 @@ async fn main(spawner: Spawner) {
                         }
                     }
                 }
-                join(
+                let selected_address = match select(
                     runner.run_with_handler(&MyEventHandler { channel: &channel }),
                     async {
+                        let mut scanning_state = ScanningState::default();
+                        signal.signal(UiState::Scanning(scanning_state.clone()));
                         let mut scanner = Scanner::new(central);
                         let _session = scanner
                             .scan(&ScanConfig {
@@ -261,9 +250,22 @@ async fn main(spawner: Spawner) {
                         let mut partial_step_position = 0;
                         // 2 is naturally how the rotary encoder physically "snaps"
                         let steps_per_increment = 2;
+
+                        let mut switch =
+                            Input::new(rotary_sw_gpio, InputConfig::default().with_pull(Pull::Up));
+                        let mut debouncer =
+                            Debouncer::new(switch.level(), Duration::from_millis(1));
+
                         loop {
-                            match select(rotary_input.next(), channel.receive()).await {
-                                Either::First(direction) => {
+                            use Either3::*;
+                            match select3(
+                                rotary_input.next(),
+                                channel.receive(),
+                                select(switch.wait_for_any_edge(), debouncer.wait()),
+                            )
+                            .await
+                            {
+                                First(direction) => {
                                     info!("rotary direction: {}", direction);
                                     partial_step_position += match direction {
                                         Direction::Clockwise => 1,
@@ -289,7 +291,7 @@ async fn main(spawner: Spawner) {
                                         signal.signal(UiState::Scanning(scanning_state.clone()));
                                     }
                                 }
-                                Either::Second(address) => {
+                                Second(address) => {
                                     // TODO: Maybe remove some peripherals if we haven't seen them for a while
                                     if !scanning_state.peripherals.contains(&address) {
                                         if scanning_state.peripherals.is_full() {
@@ -299,11 +301,31 @@ async fn main(spawner: Spawner) {
                                         signal.signal(UiState::Scanning(scanning_state.clone()));
                                     }
                                 }
+                                Third(_) => {
+                                    let level_changed =
+                                        debouncer.process_data(switch.level(), Instant::now());
+                                    if level_changed
+                                        && debouncer.value() == Level::Low
+                                        && scanning_state.selected_index > 0
+                                    {
+                                        break scanning_state.peripherals
+                                            [scanning_state.selected_index - 1];
+                                    }
+                                }
                             }
                         }
                     },
                 )
-                .await;
+                .await
+                {
+                    Either::First(_) => unreachable!(),
+                    Either::Second(selected_index) => selected_index,
+                };
+                info!("Connecting to {}", selected_address);
+                signal.signal(UiState::Connecting(ConnectingUiState {
+                    address: selected_address,
+                    is_auto: false,
+                }));
 
                 // drop(session);
                 // info!("Found a fascist board: {}. Done scanning.", address);
