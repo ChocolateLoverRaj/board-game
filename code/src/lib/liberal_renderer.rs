@@ -108,7 +108,7 @@ pub enum UiState {
     Loading,
     Connecting(ConnectingUiState),
     Scanning(ScanningState),
-    Connected(BdAddr),
+    Connected(Address),
     ReuseSavedBondError(ReuseSavedBondErrorState),
 }
 

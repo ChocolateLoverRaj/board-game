@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use defmt::{info, warn};
+use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::{join::*, select::*};
 use embassy_sync::{
@@ -150,8 +150,8 @@ async fn main(spawner: Spawner) {
 
             // Using a fixed "random" address can be useful for testing. In real scenarios, one would
             // use e.g. the MAC 6 byte array as the address (how to get that varies by the platform).
-            let address: Address = Address::random(Efuse::mac_address());
-            info!("Our address = {:?}", address);
+            let our_address: Address = Address::random(Efuse::mac_address());
+            info!("Our address = {:?}", our_address);
 
             let mut resources: HostResources<
                 DefaultPacketPool,
@@ -159,7 +159,7 @@ async fn main(spawner: Spawner) {
                 L2CAP_CHANNELS_MAX,
             > = HostResources::new();
             let stack = trouble_host::new(controller, &mut resources)
-                .set_random_address(address)
+                .set_random_address(our_address)
                 .set_random_generator_seed(&mut trng)
                 .set_io_capabilities(IoCapabilities::DisplayYesNo);
 
@@ -182,18 +182,19 @@ async fn main(spawner: Spawner) {
             if let Some(last_connected_peripheral) = &stored_data.last_connected_peripheral {
                 let _ = join(runner.run(), async {
                     let address = BdAddr::new(*last_connected_peripheral);
+                    let address = Address {
+                        kind: AddrKind::RANDOM,
+                        addr: address,
+                    };
                     signal.signal(UiState::Connecting(ConnectingUiState {
-                        address: Address {
-                            kind: AddrKind::RANDOM,
-                            addr: address,
-                        },
+                        address,
                         is_auto: true,
                     }));
                     let _connection = central
                         .connect(&ConnectConfig {
                             connect_params: Default::default(),
                             scan_config: ScanConfig {
-                                filter_accept_list: &[(AddrKind::RANDOM, &address)],
+                                filter_accept_list: &[(AddrKind::RANDOM, &address.addr)],
                                 ..Default::default()
                             },
                         })
@@ -205,12 +206,12 @@ async fn main(spawner: Spawner) {
                 .await;
             } else {
                 let channel = Channel::new();
+                let mut scanner = Scanner::new(central);
                 let selected_address = match select(
                     runner.run_with_handler(&ScanningEventHandler { channel: &channel }),
                     async {
                         let mut scanning_state = ScanningState::default();
                         signal.signal(UiState::Scanning(scanning_state.clone()));
-                        let mut scanner = Scanner::new(central);
                         let _session = scanner
                             .scan(&ScanConfig {
                                 active: true,
@@ -301,6 +302,22 @@ async fn main(spawner: Spawner) {
                     address: selected_address,
                     is_auto: false,
                 }));
+                let mut central = scanner.into_inner();
+                let _ = join(runner.run(), async {
+                    let _connection = central
+                        .connect(&ConnectConfig {
+                            connect_params: Default::default(),
+                            scan_config: ScanConfig {
+                                filter_accept_list: &[(AddrKind::RANDOM, &selected_address.addr)],
+                                ..Default::default()
+                            },
+                        })
+                        .await
+                        .unwrap();
+                    signal.signal(UiState::Connected(selected_address));
+                    core::future::pending::<()>().await;
+                })
+                .await;
 
                 // drop(session);
                 // info!("Found a fascist board: {}. Done scanning.", address);
