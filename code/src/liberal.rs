@@ -29,8 +29,10 @@ use smart_leds::{RGB8, SmartLedsWriteAsync};
 use trouble_host::prelude::*;
 
 use lib::{
-    CONNECTIONS_MAX, DATA_BUFFER_LEN, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
-    LED_BRIGHTNESS, LiberalStorage, PostcardValue, RotaryButton, RotaryInput, ScaleRgb,
+    CONNECTIONS_MAX, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS,
+    LIBERAL_DATA_BUFFER_LEN, LiberalStorage, PSM_L2CAP_EXAMPLES, PostcardValue, RotaryButton,
+    RotaryInput, ScaleRgb,
+    config::{AUTO_CONNECT, SAVE_BOND_INFO},
     liberal_renderer::{ConnectingUiState, UiState, render_display},
     scan_and_choose,
 };
@@ -131,8 +133,8 @@ async fn main(spawner: Spawner) {
                 map_config,
                 NoCache::new(),
             );
-            let mut data_buffer = [Default::default(); DATA_BUFFER_LEN];
-            let stored_data = map_storage
+            let mut data_buffer = [Default::default(); LIBERAL_DATA_BUFFER_LEN];
+            let mut stored_data = map_storage
                 .fetch_item::<PostcardValue<LiberalStorage>>(&mut data_buffer, &())
                 .await
                 .unwrap()
@@ -173,35 +175,36 @@ async fn main(spawner: Spawner) {
 
             let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
             let mut rotary_button = RotaryButton::new(rotary_sw_gpio);
-            let (address, is_auto) =
-                if let Some(last_connected_peripheral) = &stored_data.last_connected_peripheral {
-                    (
-                        Address {
-                            kind: AddrKind::RANDOM,
-                            addr: BdAddr::new(*last_connected_peripheral),
-                        },
-                        true,
-                    )
-                } else {
-                    let mut scanner = Scanner::new(central);
-                    let selected_address = scan_and_choose(
-                        &mut runner,
-                        &mut scanner,
-                        &mut rotary_input,
-                        &mut rotary_button,
-                        &signal,
-                    )
-                    .await;
-                    central = scanner.into_inner();
-                    (selected_address, false)
-                };
+            let (address, is_auto) = if AUTO_CONNECT
+                && let Some(last_connected_peripheral) = &stored_data.last_connected_peripheral
+            {
+                (
+                    Address {
+                        kind: AddrKind::RANDOM,
+                        addr: BdAddr::new(*last_connected_peripheral),
+                    },
+                    true,
+                )
+            } else {
+                let mut scanner = Scanner::new(central);
+                let selected_address = scan_and_choose(
+                    &mut runner,
+                    &mut scanner,
+                    &mut rotary_input,
+                    &mut rotary_button,
+                    &signal,
+                )
+                .await;
+                central = scanner.into_inner();
+                (selected_address, false)
+            };
             info!("Connecting to {}", address);
             signal.signal(UiState::Connecting(ConnectingUiState {
                 address: address,
                 is_auto: is_auto,
             }));
             let _ = join(runner.run(), async {
-                let _connection = central
+                let connection = central
                     .connect(&ConnectConfig {
                         connect_params: Default::default(),
                         scan_config: ScanConfig {
@@ -212,104 +215,44 @@ async fn main(spawner: Spawner) {
                     .await
                     .unwrap();
                 signal.signal(UiState::Connected(address));
+                if AUTO_CONNECT && !is_auto {
+                    // Save id
+                    stored_data.last_connected_peripheral = Some(address.addr.into_inner());
+                    map_storage
+                        .store_item(&mut data_buffer, &(), &stored_data)
+                        .await
+                        .unwrap();
+                }
+                if SAVE_BOND_INFO {
+                    // TODO: request security
+                }
+                info!("Connected, creating l2cap channel");
+                const PAYLOAD_LEN: usize = 27;
+                let config = L2capChannelConfig {
+                    mtu: Some(PAYLOAD_LEN as u16),
+                    ..Default::default()
+                };
+                let mut ch1 =
+                    L2capChannel::create(&stack, &connection, PSM_L2CAP_EXAMPLES, &config)
+                        .await
+                        .unwrap();
+                info!("New l2cap channel created, sending some data!");
+                for i in 0..10 {
+                    let tx = [i; PAYLOAD_LEN];
+                    ch1.send(&stack, &tx).await.unwrap();
+                }
+                info!("Sent data, waiting for them to be sent back");
+                let mut rx = [0; PAYLOAD_LEN];
+                for i in 0..10 {
+                    let len = ch1.receive(&stack, &mut rx).await.unwrap();
+                    assert_eq!(len, rx.len());
+                    assert_eq!(rx, [i; PAYLOAD_LEN]);
+                }
+
+                info!("Received successfully!");
                 core::future::pending::<()>().await;
             })
             .await;
-            // drop(session);
-            // info!("Found a fascist board: {}. Done scanning.", address);
-            // let mut central = scanner.into_inner();
-            // let conn = central
-            //     .connect(&ConnectConfig {
-            //         connect_params: Default::default(),
-            //         scan_config: ScanConfig {
-            //             filter_accept_list: &[(address.kind, &address.addr)],
-            //             ..Default::default()
-            //         },
-            //     })
-            //     .await
-            //     .unwrap();
-            // // Only allow creating a new bond if we haven't connected to this peripheral before
-            // let existing_bond_stored = stack
-            //     .get_bond_information()
-            //     .iter()
-            //     .any(|bond| bond.identity == conn.peer_identity());
-            // conn.set_bondable(!existing_bond_stored).unwrap();
-            // conn.request_security().unwrap();
-            // let bond = loop {
-            //     let event = conn.next().await;
-            //     info!("Connection event: {:#?}", event);
-            //     match event {
-            //         ConnectionEvent::Disconnected { reason } => {
-            //             if existing_bond_stored
-            //                 && reason == bt_hci::param::Status::AUTHENTICATION_FAILURE
-            //             {
-            //                 // warn!("Could not connect with existing bond. We can delete it and create a new bond.")
-            //             } else {
-            //                 panic!("BLE connection disconnected. reason: {:?}", reason);
-            //             }
-            //         }
-            //         ConnectionEvent::PairingComplete {
-            //             security_level: _,
-            //             bond,
-            //         } => {
-            //             break bond;
-            //         }
-            //         ConnectionEvent::PassKeyDisplay(_) => {
-            //             panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
-            //         }
-            //         ConnectionEvent::PassKeyConfirm(_) => {
-            //             panic!("fascist board is DisplayOnly so unexpected PassKeyConfirm");
-            //         }
-            //         ConnectionEvent::PassKeyInput => {
-            //             panic!("this board is DisplayYesNo so unexpected PassKeyInput");
-            //         }
-            //         ConnectionEvent::PairingFailed(e) => {
-            //             panic!("pairing failed: {e:?}");
-            //         }
-            //         _ => {
-            //             panic!("unexpected connection event");
-            //         }
-            //     }
-            // };
-            // info!("bonded: {}", bond);
-            // if !existing_bond_stored && let Some(bond) = bond {
-            //     if stored_data.saved_bonds.is_full() {
-            //         stored_data.saved_bonds.remove(0);
-            //     }
-            //     stored_data.saved_bonds.push(bond.into()).unwrap();
-            //     map_storage
-            //         .store_item(
-            //             &mut [Default::default(); DATA_BUFFER_LEN],
-            //             &(),
-            //             &stored_data,
-            //         )
-            //         .await
-            //         .unwrap();
-            // }
-
-            // info!("Connected, creating l2cap channel");
-            // const PAYLOAD_LEN: usize = 27;
-            // let config = L2capChannelConfig {
-            //     mtu: Some(PAYLOAD_LEN as u16),
-            //     ..Default::default()
-            // };
-            // let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
-            //     .await
-            //     .unwrap();
-            // info!("New l2cap channel created, sending some data!");
-            // for i in 0..10 {
-            //     let tx = [i; PAYLOAD_LEN];
-            //     ch1.send(&stack, &tx).await.unwrap();
-            // }
-            // info!("Sent data, waiting for them to be sent back");
-            // let mut rx = [0; PAYLOAD_LEN];
-            // for i in 0..10 {
-            //     let len = ch1.receive(&stack, &mut rx).await.unwrap();
-            //     assert_eq!(len, rx.len());
-            //     assert_eq!(rx, [i; PAYLOAD_LEN]);
-            // }
-
-            // info!("Received successfully!");
         },
     )
     .await;

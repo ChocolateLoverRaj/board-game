@@ -62,4 +62,5 @@ pub struct FascistStorage {
 }
 
 /// This is an estimate
-pub const DATA_BUFFER_LEN: usize = size_of::<LiberalStorage>();
+pub const LIBERAL_DATA_BUFFER_LEN: usize = size_of::<LiberalStorage>();
+pub const FASCIST_DATA_BUFFER_LEN: usize = size_of::<LiberalStorage>();

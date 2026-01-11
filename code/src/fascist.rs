@@ -5,13 +5,12 @@ use core::fmt::Write;
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_futures::{join::*, select::*};
+use embassy_futures::join::*;
 use embassy_time::{Duration, Timer};
 use embedded_graphics::{
     mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_7X14},
     pixelcolor::BinaryColor,
     prelude::*,
-    text::{Baseline, Text, renderer::TextRenderer},
 };
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::partitions::{
@@ -31,8 +30,9 @@ use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
 use lib::{
-    CONNECTIONS_MAX, DATA_BUFFER_LEN, DrawWriter, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
-    LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, SERVICE_UUID, ScaleRgb,
+    CONNECTIONS_MAX, DrawWriter, EmbeddedStorageAsyncWrapper, FASCIST_DATA_BUFFER_LEN,
+    FascistStorage, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, PSM_L2CAP_EXAMPLES, PostcardValue,
+    SERVICE_UUID, ScaleRgb, config::SAVE_BOND_INFO,
 };
 use sequential_storage::{
     cache::NoCache,
@@ -156,7 +156,7 @@ async fn main(spawner: Spawner) {
                 .unwrap();
             let nvs_partition = nvs.as_embedded_storage(&mut flash);
             let map_config = MapConfig::new(0..nvs_partition.partition_size() as u32);
-            let mut map_storage = MapStorage::<MapStorageKey, _, _>::new(
+            let mut map_storage = MapStorage::new(
                 EmbeddedStorageAsyncWrapper(nvs_partition),
                 map_config,
                 NoCache::new(),
@@ -185,12 +185,16 @@ async fn main(spawner: Spawner) {
                 .set_random_generator_seed(&mut trng)
                 .set_io_capabilities(IoCapabilities::DisplayOnly);
 
-            let mut data_buffer = [Default::default(); DATA_BUFFER_LEN];
-            let mut iter = map_storage.fetch_all_items(&mut data_buffer).await.unwrap();
-            while let Some((key, &value)) = iter.next(&mut data_buffer).await.unwrap() {
-                let bond = MapStorageKeyValue { key, value }.into();
-                info!("found existing bond: {:#?}", bond);
-                stack.add_bond_information(bond).unwrap();
+            let mut data_buffer = [Default::default(); FASCIST_DATA_BUFFER_LEN];
+            let stored_data = map_storage
+                .fetch_item::<PostcardValue<FascistStorage>>(&mut data_buffer, &())
+                .await
+                .unwrap()
+                .unwrap_or_default();
+            for saved_bond_information in stored_data.saved_bonds.iter().cloned() {
+                stack
+                    .add_bond_information(saved_bond_information.into())
+                    .unwrap();
             }
 
             let Host {
@@ -232,94 +236,41 @@ async fn main(spawner: Spawner) {
                         .await
                         .unwrap();
                     let conn = advertiser.accept().await.unwrap();
-                    // If we set this to false, we can require the previously created bond to be used
-                    // However, if the central deleted its saved bond, we would need a way to prompt the user
-                    // To ask them if we should delete our saved bond and make a new one
-                    // We don't have a way of prompting the user so we're not going to do that
-                    conn.set_bondable(true).unwrap();
-                    if let Ok(bond) = match select(
-                        async {
-                            loop {
-                                let event = conn.next().await;
-                                info!("Connection event: {:#?}", event);
-                                match event {
-                                    ConnectionEvent::PairingComplete {
-                                        security_level: _,
-                                        bond,
-                                    } => {
-                                        break Ok(bond);
-                                    }
-                                    connection_event => {
-                                        break Err(connection_event);
-                                    }
-                                }
-                            }
-                        },
-                        async {
-                            // See https://github.com/embassy-rs/trouble/issues/522
-                            loop {
-                                if matches!(
-                                    conn.security_level().unwrap(),
-                                    SecurityLevel::Encrypted
-                                        | SecurityLevel::EncryptedAuthenticated
-                                ) {
-                                    break;
-                                }
-                                Timer::after(Duration::from_millis(100)).await;
-                            }
-                        },
-                    )
-                    .await
-                    {
-                        Either::First(bond) => bond,
-                        Either::Second(_) => Ok(None),
-                    } {
-                        info!("bonded: {}", bond);
-                        if let Some(bond) = bond {
-                            info!("storing bond");
-                            let MapStorageKeyValue { key, value } = MapStorageKeyValue::from(bond);
-                            map_storage
-                                .store_item(
-                                    &mut [Default::default(); DATA_BUFFER_LEN],
-                                    &key,
-                                    &&value,
-                                )
-                                .await
-                                .unwrap();
-                        }
+                    info!("Connection established");
 
-                        info!("Connection established");
-
-                        let config = L2capChannelConfig {
-                            mtu: Some(PAYLOAD_LEN as u16),
-                            ..Default::default()
-                        };
-                        let mut ch1 =
-                            L2capChannel::accept(&stack, &conn, &[PSM_L2CAP_EXAMPLES], &config)
-                                .await
-                                .unwrap();
-
-                        info!("L2CAP channel accepted");
-
-                        // Size of payload we're expecting
-                        const PAYLOAD_LEN: usize = 27;
-                        let mut rx = [0; PAYLOAD_LEN];
-                        for i in 0..10 {
-                            let len = ch1.receive(&stack, &mut rx).await.unwrap();
-                            assert_eq!(len, rx.len());
-                            assert_eq!(rx, [i; PAYLOAD_LEN]);
-                        }
-
-                        info!("L2CAP data received, echoing");
-                        Timer::after(Duration::from_secs(1)).await;
-                        for i in 0..10 {
-                            let tx = [i; PAYLOAD_LEN];
-                            ch1.send(&stack, &tx).await.unwrap();
-                        }
-                        info!("L2CAP data echoed");
-
-                        Timer::after(Duration::from_secs(2)).await;
+                    if SAVE_BOND_INFO {
+                        // TODO: actually use encryption
                     }
+
+                    let config = L2capChannelConfig {
+                        mtu: Some(PAYLOAD_LEN as u16),
+                        ..Default::default()
+                    };
+                    let mut ch1 =
+                        L2capChannel::accept(&stack, &conn, &[PSM_L2CAP_EXAMPLES], &config)
+                            .await
+                            .unwrap();
+
+                    info!("L2CAP channel accepted");
+
+                    // Size of payload we're expecting
+                    const PAYLOAD_LEN: usize = 27;
+                    let mut rx = [0; PAYLOAD_LEN];
+                    for i in 0..10 {
+                        let len = ch1.receive(&stack, &mut rx).await.unwrap();
+                        assert_eq!(len, rx.len());
+                        assert_eq!(rx, [i; PAYLOAD_LEN]);
+                    }
+
+                    info!("L2CAP data received, echoing");
+                    Timer::after(Duration::from_secs(1)).await;
+                    for i in 0..10 {
+                        let tx = [i; PAYLOAD_LEN];
+                        ch1.send(&stack, &tx).await.unwrap();
+                    }
+                    info!("L2CAP data echoed");
+
+                    Timer::after(Duration::from_secs(2)).await;
                 }
             })
             .await;

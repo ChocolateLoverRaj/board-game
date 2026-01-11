@@ -7,8 +7,7 @@ pub const AUTO_CONNECT: bool = true;
 /// If set, store bond info and give a warning if we connect to a peripheral with previously stored bond info,
 /// but the peripheral does not have the previously saved bond info
 /// (which could indicate a man in the middle attack).
-/// Also, the number of bonds to store.
-pub const SAVE_BOND_INFO: Option<NonZero<usize>> = None;
+pub const SAVE_BOND_INFO: bool = false;
 /// Invert the display every once in a while to reduce burn in.
 /// I'm not sure whether this actually reduces burn-in
 /// or if it just makes all pixels burned in more evenly.
