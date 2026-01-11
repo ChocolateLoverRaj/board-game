@@ -3,12 +3,14 @@ mod debouncer;
 mod embedded_storage_async_wrapper;
 mod map_storage;
 mod rotary_encoder;
+mod rotary_input;
 mod scale_rgb;
 
 pub use debouncer::*;
 pub use embedded_storage_async_wrapper::*;
 pub use map_storage::*;
 pub use rotary_encoder::*;
+pub use rotary_input::*;
 pub use scale_rgb::*;
 use trouble_host::prelude::{Uuid, uuid};
 

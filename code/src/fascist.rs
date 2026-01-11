@@ -348,7 +348,7 @@ async fn main(spawner: Spawner) {
                         }
                         info!("L2CAP data echoed");
 
-                        Timer::after(Duration::from_secs(60)).await;
+                        Timer::after(Duration::from_secs(2)).await;
                     }
                 }
             })

@@ -18,7 +18,7 @@ use esp_bootloader_esp_idf::partitions::{
 };
 use esp_hal::{
     efuse::Efuse,
-    gpio::{Input, InputConfig, Level, Pull},
+    gpio::{Input, InputConfig, Pull},
     i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
     rmt::Rmt,
@@ -39,8 +39,8 @@ use trouble_host::prelude::*;
 
 use lib::{
     CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
-    LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, RotaryEncoder,
-    RotaryPinsState, SERVICE_UUID, ScaleRgb,
+    LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, RotaryInput,
+    SERVICE_UUID, ScaleRgb,
 };
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, prelude::DisplayRotation, prelude::*,
@@ -170,31 +170,10 @@ async fn main(spawner: Spawner) {
             }
         },
         async {
-            let mut dt = Input::new(rotary_dt_gpio, InputConfig::default().with_pull(Pull::Up));
-            let debounce_time = Duration::from_millis(1);
-            let mut dt_debounce = Debouncer::new(dt.level(), debounce_time);
-            let mut clk = Input::new(rotary_clk_gpio, InputConfig::default().with_pull(Pull::Up));
-            let mut clk_debounce = Debouncer::new(clk.level(), debounce_time);
-            let mut rotary_encoder = RotaryEncoder::new(RotaryPinsState {
-                dt: dt_debounce.value() == Level::Low,
-                clk: clk_debounce.value() == Level::Low,
-            });
+            let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
             loop {
-                select4(
-                    dt.wait_for_any_edge(),
-                    dt_debounce.wait(),
-                    clk.wait_for_any_edge(),
-                    clk_debounce.wait(),
-                )
-                .await;
-                dt_debounce.process_data(dt.level(), Instant::now());
-                clk_debounce.process_data(clk.level(), Instant::now());
-                if let Some(direction) = rotary_encoder.process_data(RotaryPinsState {
-                    dt: dt_debounce.value() == Level::Low,
-                    clk: clk_debounce.value() == Level::Low,
-                }) {
-                    info!("rotary direction: {}", direction);
-                }
+                let direction = rotary_input.next().await;
+                info!("rotary direction: {}", direction);
             }
         },
         async {
