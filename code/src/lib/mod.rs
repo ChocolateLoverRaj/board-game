@@ -9,6 +9,7 @@ mod render;
 mod rotary_encoder;
 mod rotary_input;
 mod scale_rgb;
+mod scan_and_choose;
 mod scanning_event_handler;
 mod storage;
 
@@ -20,6 +21,7 @@ pub use render::*;
 pub use rotary_encoder::*;
 pub use rotary_input::*;
 pub use scale_rgb::*;
+pub use scan_and_choose::*;
 pub use scanning_event_handler::*;
 pub use storage::*;
 use trouble_host::prelude::{Uuid, uuid};

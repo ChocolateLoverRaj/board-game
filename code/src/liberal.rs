@@ -3,18 +3,14 @@
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_futures::{join::*, select::*};
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
-};
-use embassy_time::{Duration, Instant};
+use embassy_futures::join::*;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::partitions::{
     DataPartitionSubType, PARTITION_TABLE_MAX_LEN, PartitionType, read_partition_table,
 };
 use esp_hal::{
     efuse::Efuse,
-    gpio::{Input, InputConfig, Level, Pull},
     interrupt::software::SoftwareInterruptControl,
     rmt::Rmt,
     rng::{Trng, TrngSource},
@@ -33,10 +29,10 @@ use smart_leds::{RGB8, SmartLedsWriteAsync};
 use trouble_host::prelude::*;
 
 use lib::{
-    CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, Direction, EmbeddedStorageAsyncWrapper,
-    L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, LiberalStorage, PostcardValue, RotaryInput, ScaleRgb,
-    ScanningEventHandler,
-    liberal_renderer::{ConnectingUiState, ScanningState, UiState, render_display},
+    CONNECTIONS_MAX, DATA_BUFFER_LEN, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
+    LED_BRIGHTNESS, LiberalStorage, PostcardValue, RotaryButton, RotaryInput, ScaleRgb,
+    liberal_renderer::{ConnectingUiState, UiState, render_display},
+    scan_and_choose,
 };
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -175,246 +171,145 @@ async fn main(spawner: Spawner) {
                 ..
             } = stack.build();
 
-            // NOTE: Modify this to match the address of the peripheral you want to connect to.
-            // Currently, it matches the address used by the peripheral examples
-            // let target: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
-
-            if let Some(last_connected_peripheral) = &stored_data.last_connected_peripheral {
-                let _ = join(runner.run(), async {
-                    let address = BdAddr::new(*last_connected_peripheral);
-                    let address = Address {
-                        kind: AddrKind::RANDOM,
-                        addr: address,
-                    };
-                    signal.signal(UiState::Connecting(ConnectingUiState {
-                        address,
-                        is_auto: true,
-                    }));
-                    let _connection = central
-                        .connect(&ConnectConfig {
-                            connect_params: Default::default(),
-                            scan_config: ScanConfig {
-                                filter_accept_list: &[(AddrKind::RANDOM, &address.addr)],
-                                ..Default::default()
-                            },
-                        })
-                        .await
-                        .unwrap();
-                    signal.signal(UiState::Connected(address));
-                    core::future::pending::<()>().await;
-                })
-                .await;
-            } else {
-                let channel = Channel::new();
-                let mut scanner = Scanner::new(central);
-                let selected_address = match select(
-                    runner.run_with_handler(&ScanningEventHandler { channel: &channel }),
-                    async {
-                        let mut scanning_state = ScanningState::default();
-                        signal.signal(UiState::Scanning(scanning_state.clone()));
-                        let _session = scanner
-                            .scan(&ScanConfig {
-                                active: true,
-                                phys: PhySet::M1,
-                                interval: Duration::from_secs(1),
-                                window: Duration::from_secs(1),
-                                ..Default::default()
-                            })
-                            .await
-                            .unwrap();
-                        let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
-                        let mut partial_step_position = 0;
-                        // 2 is naturally how the rotary encoder physically "snaps"
-                        let steps_per_increment = 2;
-
-                        let mut switch =
-                            Input::new(rotary_sw_gpio, InputConfig::default().with_pull(Pull::Up));
-                        let mut debouncer =
-                            Debouncer::new(switch.level(), Duration::from_millis(1));
-
-                        loop {
-                            use Either3::*;
-                            match select3(
-                                rotary_input.next(),
-                                channel.receive(),
-                                select(switch.wait_for_any_edge(), debouncer.wait()),
-                            )
-                            .await
-                            {
-                                First(direction) => {
-                                    info!("rotary direction: {}", direction);
-                                    partial_step_position += match direction {
-                                        Direction::Clockwise => 1,
-                                        Direction::CounterClockwise => -1,
-                                    };
-                                    let selected_index_changed =
-                                        if partial_step_position >= steps_per_increment {
-                                            scanning_state.selected_index = scanning_state
-                                                .selected_index
-                                                .saturating_add(1)
-                                                .min(1 + scanning_state.peripherals.len() - 1);
-                                            true
-                                        } else if partial_step_position <= -steps_per_increment {
-                                            scanning_state.selected_index =
-                                                scanning_state.selected_index.saturating_sub(1);
-                                            true
-                                        } else {
-                                            false
-                                        };
-                                    if selected_index_changed {
-                                        // TODO: Scroll into view
-                                        partial_step_position = 0;
-                                        signal.signal(UiState::Scanning(scanning_state.clone()));
-                                    }
-                                }
-                                Second(address) => {
-                                    // TODO: Maybe remove some peripherals if we haven't seen them for a while
-                                    if !scanning_state.peripherals.contains(&address) {
-                                        if scanning_state.peripherals.is_full() {
-                                            scanning_state.peripherals.remove(0);
-                                        }
-                                        scanning_state.peripherals.push(address).unwrap();
-                                        signal.signal(UiState::Scanning(scanning_state.clone()));
-                                    }
-                                }
-                                Third(_) => {
-                                    let level_changed =
-                                        debouncer.process_data(switch.level(), Instant::now());
-                                    if level_changed
-                                        && debouncer.value() == Level::Low
-                                        && scanning_state.selected_index > 0
-                                    {
-                                        break scanning_state.peripherals
-                                            [scanning_state.selected_index - 1];
-                                    }
-                                }
-                            }
-                        }
-                    },
-                )
-                .await
-                {
-                    Either::First(_) => unreachable!(),
-                    Either::Second(selected_index) => selected_index,
+            let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
+            let mut rotary_button = RotaryButton::new(rotary_sw_gpio);
+            let (address, is_auto) =
+                if let Some(last_connected_peripheral) = &stored_data.last_connected_peripheral {
+                    (
+                        Address {
+                            kind: AddrKind::RANDOM,
+                            addr: BdAddr::new(*last_connected_peripheral),
+                        },
+                        true,
+                    )
+                } else {
+                    let mut scanner = Scanner::new(central);
+                    let selected_address = scan_and_choose(
+                        &mut runner,
+                        &mut scanner,
+                        &mut rotary_input,
+                        &mut rotary_button,
+                        &signal,
+                    )
+                    .await;
+                    central = scanner.into_inner();
+                    (selected_address, false)
                 };
-                info!("Connecting to {}", selected_address);
-                signal.signal(UiState::Connecting(ConnectingUiState {
-                    address: selected_address,
-                    is_auto: false,
-                }));
-                let mut central = scanner.into_inner();
-                let _ = join(runner.run(), async {
-                    let _connection = central
-                        .connect(&ConnectConfig {
-                            connect_params: Default::default(),
-                            scan_config: ScanConfig {
-                                filter_accept_list: &[(AddrKind::RANDOM, &selected_address.addr)],
-                                ..Default::default()
-                            },
-                        })
-                        .await
-                        .unwrap();
-                    signal.signal(UiState::Connected(selected_address));
-                    core::future::pending::<()>().await;
-                })
-                .await;
+            info!("Connecting to {}", address);
+            signal.signal(UiState::Connecting(ConnectingUiState {
+                address: address,
+                is_auto: is_auto,
+            }));
+            let _ = join(runner.run(), async {
+                let _connection = central
+                    .connect(&ConnectConfig {
+                        connect_params: Default::default(),
+                        scan_config: ScanConfig {
+                            filter_accept_list: &[(AddrKind::RANDOM, &address.addr)],
+                            ..Default::default()
+                        },
+                    })
+                    .await
+                    .unwrap();
+                signal.signal(UiState::Connected(address));
+                core::future::pending::<()>().await;
+            })
+            .await;
+            // drop(session);
+            // info!("Found a fascist board: {}. Done scanning.", address);
+            // let mut central = scanner.into_inner();
+            // let conn = central
+            //     .connect(&ConnectConfig {
+            //         connect_params: Default::default(),
+            //         scan_config: ScanConfig {
+            //             filter_accept_list: &[(address.kind, &address.addr)],
+            //             ..Default::default()
+            //         },
+            //     })
+            //     .await
+            //     .unwrap();
+            // // Only allow creating a new bond if we haven't connected to this peripheral before
+            // let existing_bond_stored = stack
+            //     .get_bond_information()
+            //     .iter()
+            //     .any(|bond| bond.identity == conn.peer_identity());
+            // conn.set_bondable(!existing_bond_stored).unwrap();
+            // conn.request_security().unwrap();
+            // let bond = loop {
+            //     let event = conn.next().await;
+            //     info!("Connection event: {:#?}", event);
+            //     match event {
+            //         ConnectionEvent::Disconnected { reason } => {
+            //             if existing_bond_stored
+            //                 && reason == bt_hci::param::Status::AUTHENTICATION_FAILURE
+            //             {
+            //                 // warn!("Could not connect with existing bond. We can delete it and create a new bond.")
+            //             } else {
+            //                 panic!("BLE connection disconnected. reason: {:?}", reason);
+            //             }
+            //         }
+            //         ConnectionEvent::PairingComplete {
+            //             security_level: _,
+            //             bond,
+            //         } => {
+            //             break bond;
+            //         }
+            //         ConnectionEvent::PassKeyDisplay(_) => {
+            //             panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
+            //         }
+            //         ConnectionEvent::PassKeyConfirm(_) => {
+            //             panic!("fascist board is DisplayOnly so unexpected PassKeyConfirm");
+            //         }
+            //         ConnectionEvent::PassKeyInput => {
+            //             panic!("this board is DisplayYesNo so unexpected PassKeyInput");
+            //         }
+            //         ConnectionEvent::PairingFailed(e) => {
+            //             panic!("pairing failed: {e:?}");
+            //         }
+            //         _ => {
+            //             panic!("unexpected connection event");
+            //         }
+            //     }
+            // };
+            // info!("bonded: {}", bond);
+            // if !existing_bond_stored && let Some(bond) = bond {
+            //     if stored_data.saved_bonds.is_full() {
+            //         stored_data.saved_bonds.remove(0);
+            //     }
+            //     stored_data.saved_bonds.push(bond.into()).unwrap();
+            //     map_storage
+            //         .store_item(
+            //             &mut [Default::default(); DATA_BUFFER_LEN],
+            //             &(),
+            //             &stored_data,
+            //         )
+            //         .await
+            //         .unwrap();
+            // }
 
-                // drop(session);
-                // info!("Found a fascist board: {}. Done scanning.", address);
-                // let mut central = scanner.into_inner();
-                // let conn = central
-                //     .connect(&ConnectConfig {
-                //         connect_params: Default::default(),
-                //         scan_config: ScanConfig {
-                //             filter_accept_list: &[(address.kind, &address.addr)],
-                //             ..Default::default()
-                //         },
-                //     })
-                //     .await
-                //     .unwrap();
-                // // Only allow creating a new bond if we haven't connected to this peripheral before
-                // let existing_bond_stored = stack
-                //     .get_bond_information()
-                //     .iter()
-                //     .any(|bond| bond.identity == conn.peer_identity());
-                // conn.set_bondable(!existing_bond_stored).unwrap();
-                // conn.request_security().unwrap();
-                // let bond = loop {
-                //     let event = conn.next().await;
-                //     info!("Connection event: {:#?}", event);
-                //     match event {
-                //         ConnectionEvent::Disconnected { reason } => {
-                //             if existing_bond_stored
-                //                 && reason == bt_hci::param::Status::AUTHENTICATION_FAILURE
-                //             {
-                //                 // warn!("Could not connect with existing bond. We can delete it and create a new bond.")
-                //             } else {
-                //                 panic!("BLE connection disconnected. reason: {:?}", reason);
-                //             }
-                //         }
-                //         ConnectionEvent::PairingComplete {
-                //             security_level: _,
-                //             bond,
-                //         } => {
-                //             break bond;
-                //         }
-                //         ConnectionEvent::PassKeyDisplay(_) => {
-                //             panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
-                //         }
-                //         ConnectionEvent::PassKeyConfirm(_) => {
-                //             panic!("fascist board is DisplayOnly so unexpected PassKeyConfirm");
-                //         }
-                //         ConnectionEvent::PassKeyInput => {
-                //             panic!("this board is DisplayYesNo so unexpected PassKeyInput");
-                //         }
-                //         ConnectionEvent::PairingFailed(e) => {
-                //             panic!("pairing failed: {e:?}");
-                //         }
-                //         _ => {
-                //             panic!("unexpected connection event");
-                //         }
-                //     }
-                // };
-                // info!("bonded: {}", bond);
-                // if !existing_bond_stored && let Some(bond) = bond {
-                //     if stored_data.saved_bonds.is_full() {
-                //         stored_data.saved_bonds.remove(0);
-                //     }
-                //     stored_data.saved_bonds.push(bond.into()).unwrap();
-                //     map_storage
-                //         .store_item(
-                //             &mut [Default::default(); DATA_BUFFER_LEN],
-                //             &(),
-                //             &stored_data,
-                //         )
-                //         .await
-                //         .unwrap();
-                // }
+            // info!("Connected, creating l2cap channel");
+            // const PAYLOAD_LEN: usize = 27;
+            // let config = L2capChannelConfig {
+            //     mtu: Some(PAYLOAD_LEN as u16),
+            //     ..Default::default()
+            // };
+            // let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
+            //     .await
+            //     .unwrap();
+            // info!("New l2cap channel created, sending some data!");
+            // for i in 0..10 {
+            //     let tx = [i; PAYLOAD_LEN];
+            //     ch1.send(&stack, &tx).await.unwrap();
+            // }
+            // info!("Sent data, waiting for them to be sent back");
+            // let mut rx = [0; PAYLOAD_LEN];
+            // for i in 0..10 {
+            //     let len = ch1.receive(&stack, &mut rx).await.unwrap();
+            //     assert_eq!(len, rx.len());
+            //     assert_eq!(rx, [i; PAYLOAD_LEN]);
+            // }
 
-                // info!("Connected, creating l2cap channel");
-                // const PAYLOAD_LEN: usize = 27;
-                // let config = L2capChannelConfig {
-                //     mtu: Some(PAYLOAD_LEN as u16),
-                //     ..Default::default()
-                // };
-                // let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
-                //     .await
-                //     .unwrap();
-                // info!("New l2cap channel created, sending some data!");
-                // for i in 0..10 {
-                //     let tx = [i; PAYLOAD_LEN];
-                //     ch1.send(&stack, &tx).await.unwrap();
-                // }
-                // info!("Sent data, waiting for them to be sent back");
-                // let mut rx = [0; PAYLOAD_LEN];
-                // for i in 0..10 {
-                //     let len = ch1.receive(&stack, &mut rx).await.unwrap();
-                //     assert_eq!(len, rx.len());
-                //     assert_eq!(rx, [i; PAYLOAD_LEN]);
-                // }
-
-                // info!("Received successfully!");
-            };
+            // info!("Received successfully!");
         },
     )
     .await;

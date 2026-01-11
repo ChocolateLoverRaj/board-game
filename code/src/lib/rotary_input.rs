@@ -1,4 +1,4 @@
-use embassy_futures::select::select4;
+use embassy_futures::select::{select, select4};
 use embassy_time::{Duration, Instant};
 use esp_hal::gpio::{Input, InputConfig, InputPin, Level, Pull};
 
@@ -50,6 +50,31 @@ impl<'a> RotaryInput<'a> {
                 clk: self.clk_debounce.value() == Level::Low,
             }) {
                 break direction;
+            }
+        }
+    }
+}
+
+pub struct RotaryButton<'a> {
+    switch: Input<'a>,
+    debouncer: Debouncer<Level>,
+}
+
+impl<'a> RotaryButton<'a> {
+    pub fn new(rotary_sw_gpio: impl InputPin + 'a) -> Self {
+        let switch = Input::new(rotary_sw_gpio, InputConfig::default().with_pull(Pull::Up));
+        let debouncer = Debouncer::new(switch.level(), Duration::from_millis(1));
+        Self { switch, debouncer }
+    }
+
+    pub async fn wait_until_press(&mut self) {
+        loop {
+            select(self.switch.wait_for_any_edge(), self.debouncer.wait()).await;
+            let level_changed = self
+                .debouncer
+                .process_data(self.switch.level(), Instant::now());
+            if level_changed && self.debouncer.value() == Level::Low {
+                break;
             }
         }
     }
