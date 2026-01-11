@@ -301,14 +301,10 @@ async fn main(spawner: Spawner) {
                             // TODO: Maybe remove some peripherals if we haven't seen them for a while
                             let address = channel.receive().await;
                             if !scanning_state.peripherals.contains(&address) {
-                                let is_first = scanning_state.peripherals.is_empty();
                                 if scanning_state.peripherals.is_full() {
                                     scanning_state.peripherals.remove(0);
                                 }
                                 scanning_state.peripherals.push(address).unwrap();
-                                if is_first {
-                                    scanning_state.selected_index = Some(0);
-                                }
                                 signal.signal(UiState::Scanning(scanning_state.clone()));
                             }
                         }

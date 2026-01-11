@@ -3,12 +3,11 @@ use core::fmt::{Debug, Write};
 use defmt::Format;
 use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Instant, Timer};
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyleBuilder, iso_8859_16::FONT_7X14},
     pixelcolor::BinaryColor,
     prelude::*,
-    primitives::{PrimitiveStyleBuilder, Rectangle},
     text::{Baseline, Text},
 };
 use esp_hal::{
@@ -23,7 +22,9 @@ use ssd1306::{
 use strum::{EnumIter, VariantArray};
 use trouble_host::Address;
 
-use crate::{DrawWriter, config::INVERT_SCREEN_INTERVAL};
+use crate::{
+    Element, FlexElement, ListElement, ScrollYElement, TextElement, config::INVERT_SCREEN_INTERVAL,
+};
 
 pub const FONT: &MonoFont = &FONT_7X14;
 // ssd1306 doesn't expose these numbers so we can just manually write them
@@ -78,53 +79,46 @@ pub enum UiState {
     ReuseSavedBondError(ReuseSavedBondErrorState),
 }
 
-async fn render_ui(
-    display: &mut Ssd1306Async<
-        I2CInterface<I2c<'_, esp_hal::Async>>,
-        DisplaySize128x64,
-        ssd1306::mode::BufferedGraphicsModeAsync<DisplaySize128x64>,
-    >,
-    ui_state: UiState,
-) {
+type D<'a> = Ssd1306Async<
+    I2CInterface<I2c<'a, esp_hal::Async>>,
+    DisplaySize128x64,
+    ssd1306::mode::BufferedGraphicsModeAsync<DisplaySize128x64>,
+>;
+
+async fn render_ui(display: &mut D<'_>, ui_state: UiState) {
     display.clear(BinaryColor::Off).unwrap();
     match ui_state {
         UiState::Loading => {
-            Text::with_baseline(
-                "Loading Saved Bond",
-                Point::zero(),
-                MonoTextStyleBuilder::new()
+            TextElement {
+                text: format_args!("Loading"),
+                character_style: MonoTextStyleBuilder::new()
                     .font(FONT)
                     .text_color(BinaryColor::On)
                     .build(),
-                Baseline::Top,
-            )
-            .draw(display)
+            }
+            .draw(display, display.bounding_box())
             .unwrap();
         }
-        UiState::Connecting(address) => {
-            Text::with_baseline(
-                "Connecting",
-                Point::zero(),
-                MonoTextStyleBuilder::new()
+        UiState::Connecting(ConnectingUiState { address, is_auto }) => {
+            TextElement {
+                text: format_args!("Connecting to {address:?}\nIs automatic? {is_auto}"),
+                character_style: MonoTextStyleBuilder::new()
                     .font(FONT)
                     .text_color(BinaryColor::On)
                     .build(),
-                Baseline::Top,
-            )
-            .draw(display)
+            }
+            .draw(display, display.bounding_box())
             .unwrap();
         }
         UiState::Connected(address) => {
-            Text::with_baseline(
-                "Connected",
-                Point::zero(),
-                MonoTextStyleBuilder::new()
+            TextElement {
+                text: format_args!("Connected to {address:?}"),
+                character_style: MonoTextStyleBuilder::new()
                     .font(FONT)
                     .text_color(BinaryColor::On)
                     .build(),
-                Baseline::Top,
-            )
-            .draw(display)
+            }
+            .draw(display, display.bounding_box())
             .unwrap();
         }
         UiState::ReuseSavedBondError(ReuseSavedBondErrorState {
@@ -182,61 +176,66 @@ async fn render_ui(
         }
         UiState::Scanning(ScanningState {
             peripherals,
-            selected_index: selected_inndex,
+            selected_index,
             scroll_y,
         }) => {
-            Text::with_baseline(
-                "Scanning",
-                Point::zero(),
-                MonoTextStyleBuilder::new()
-                    .font(FONT)
-                    .text_color(BinaryColor::On)
-                    .build(),
-                Baseline::Top,
-            )
-            .draw(display)
+            ScrollYElement {
+                element: &FlexElement {
+                    elements: &[
+                        &{
+                            let is_selected = selected_index.is_none();
+                            TextElement {
+                                text: "Scanning...",
+                                character_style: MonoTextStyleBuilder::new()
+                                    .font(FONT)
+                                    .text_color(if is_selected {
+                                        BinaryColor::Off
+                                    } else {
+                                        BinaryColor::On
+                                    })
+                                    .background_color(if is_selected {
+                                        BinaryColor::On
+                                    } else {
+                                        BinaryColor::Off
+                                    })
+                                    .build(),
+                            }
+                        } as &dyn Element<D<'_>>,
+                        &ListElement {
+                            elements: peripherals.iter().enumerate().map(|(i, address)| {
+                                let is_selected = selected_index == Some(i);
+                                let address = address.clone();
+                                TextElement {
+                                    text: {
+                                        let mut s = heapless::String::<{ 6 * 2 + (6 - 1) }>::new();
+                                        write!(s, "{address}").unwrap();
+                                        s
+                                    },
+                                    character_style: MonoTextStyleBuilder::new()
+                                        .font(FONT)
+                                        .text_color(if is_selected {
+                                            BinaryColor::Off
+                                        } else {
+                                            BinaryColor::On
+                                        })
+                                        .background_color(if is_selected {
+                                            BinaryColor::On
+                                        } else {
+                                            BinaryColor::Off
+                                        })
+                                        .build(),
+                                }
+                            }),
+                        } as &dyn Element<D<'_>>,
+                    ],
+                    dynamic_element: None,
+                },
+                scroll_y,
+                scrollbar_color: BinaryColor::On,
+                scrollbar_width: 1,
+            }
+            .draw(display, display.bounding_box())
             .unwrap();
-            for (i, peripheral) in peripherals.iter().enumerate() {
-                let is_selected = selected_inndex.is_some_and(|selected_index| i == selected_index);
-                let mut writer = DrawWriter::new(
-                    display,
-                    Point::new(0, (1 + i) as i32 * FONT.character_size.height as i32),
-                    MonoTextStyleBuilder::new()
-                        .font(FONT)
-                        .text_color(if is_selected {
-                            BinaryColor::Off
-                        } else {
-                            BinaryColor::On
-                        })
-                        .background_color(if is_selected {
-                            BinaryColor::On
-                        } else {
-                            BinaryColor::Off
-                        })
-                        .build(),
-                );
-                write!(writer, "{peripheral}");
-            }
-            // Draw the scrollbar
-            let total_height = (1 + peripherals.len()) as f64 * FONT.character_size.height as f64;
-            let display_height = DISPLAY_HEIGHT as f64;
-            if total_height > display_height {
-                let scrollbar_height =
-                    ((display_height / total_height * display_height) as u32).max(1);
-                let scrollbar_y = (scroll_y as f64 / total_height * display_height) as u32;
-                let scrollbar_width = 1;
-                Rectangle::new(
-                    Point::new((DISPLAY_WIDTH - scrollbar_width) as i32, scrollbar_y as i32),
-                    Size::new(scrollbar_width, scrollbar_height),
-                )
-                .into_styled(
-                    PrimitiveStyleBuilder::new()
-                        .fill_color(BinaryColor::On)
-                        .build(),
-                )
-                .draw(display)
-                .unwrap();
-            }
         }
     }
     display.flush().await.unwrap();

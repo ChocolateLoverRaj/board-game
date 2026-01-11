@@ -19,6 +19,13 @@ impl<'a, D, S> DrawWriter<'a, D, S> {
         }
     }
 }
+
+impl<D, S> DrawWriter<'_, D, S> {
+    pub fn position(self) -> Point {
+        self.position
+    }
+}
+
 impl<D, S: TextRenderer + Clone> Write for DrawWriter<'_, D, S>
 where
     D: DrawTarget<Color = S::Color>,
