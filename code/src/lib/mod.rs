@@ -1,6 +1,7 @@
 #![no_std]
 mod debouncer;
 mod embedded_storage_async_wrapper;
+pub mod liberal_renderer;
 mod map_storage;
 mod rotary_encoder;
 mod rotary_input;

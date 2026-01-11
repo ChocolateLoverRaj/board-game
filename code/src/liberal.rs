@@ -6,13 +6,6 @@ use embassy_executor::Spawner;
 use embassy_futures::{join::*, select::*};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Instant};
-use embedded_graphics::{
-    mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_7X14},
-    pixelcolor::BinaryColor,
-    prelude::*,
-    primitives::{PrimitiveStyleBuilder, Rectangle},
-    text::{Baseline, Text},
-};
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::partitions::{
     DataPartitionSubType, PARTITION_TABLE_MAX_LEN, PartitionType, read_partition_table,
@@ -20,7 +13,6 @@ use esp_bootloader_esp_idf::partitions::{
 use esp_hal::{
     efuse::Efuse,
     gpio::{Input, InputConfig, Pull},
-    i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
     rmt::Rmt,
     rng::{Trng, TrngSource},
@@ -42,10 +34,7 @@ use lib::{
     CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, Direction, EmbeddedStorageAsyncWrapper,
     L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES,
     RotaryInput, SERVICE_UUID, ScaleRgb,
-};
-use ssd1306::{
-    I2CDisplayInterface, Ssd1306Async, prelude::DisplayRotation, prelude::*,
-    size::DisplaySize128x64,
+    liberal_renderer::{DISPLAY_HEIGHT, FONT, OPTIONS, UiState, render_display},
 };
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -124,52 +113,9 @@ async fn main(spawner: Spawner) {
 
     leds_adapter.write(led_colors).await.unwrap();
 
-    join4(
+    join3(
         async {
-            // Turn on the OLED display
-            let i2c = I2c::new(
-                p.I2C0,
-                i2c::master::Config::default().with_frequency(Rate::from_khz(400)),
-            )
-            .unwrap()
-            .with_scl(i2c_scl_gpio)
-            .with_sda(i2c_sda_gpio)
-            .into_async();
-            let mut display = Ssd1306Async::new(
-                I2CDisplayInterface::new(i2c),
-                DisplaySize128x64,
-                DisplayRotation::Rotate0,
-            )
-            .into_buffered_graphics_mode();
-            display.init().await.unwrap();
-
-            #[derive(Debug, Default)]
-            struct UiState {
-                selected_index: usize,
-                scroll_y: u32,
-            }
-            let signal = Signal::<CriticalSectionRawMutex, UiState>::new();
-            let font = &FONT_7X14;
-            let options = [
-                "Back",
-                "00:00:00:00:00:00",
-                "11:11:11:11:11:11",
-                "22:22:22:22:22:22",
-                "33:33:33:33:33:33",
-                "44:44:44:44:44:44",
-                "55:55:55:55:55:55",
-                "66:66:66:66:66:66",
-                "77:77:77:77:77:77",
-                "88:88:88:88:88:88",
-                "99:99:99:99:99:99",
-                "AA:AA:AA:AA:AA:AA",
-                "BB:BB:BB:BB:BB:BB",
-                "CC:CC:CC:CC:CC:CC",
-                "DD:DD:DD:DD:DD:DD",
-                "EE:EE:EE:EE:EE:EE",
-                "FF:FF:FF:FF:FF:FF",
-            ];
-            let display_size = display.size();
+            let signal = Signal::<CriticalSectionRawMutex, _>::new();
             join(
                 async {
                     let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
@@ -187,20 +133,19 @@ async fn main(spawner: Spawner) {
                         };
                         if partial_step_position >= steps_per_increment {
                             selected_index =
-                                selected_index.saturating_add(1).min(options.len() - 1);
+                                selected_index.saturating_add(1).min(OPTIONS.len() - 1);
                             partial_step_position = 0;
                             // scroll down if needed
                             let bottom_y =
-                                font.character_size.height * (selected_index as u32 + 1) - scroll_y;
-                            let display_height = display_size.height;
-                            if bottom_y > display_height {
-                                scroll_y += bottom_y - display_height;
+                                FONT.character_size.height * (selected_index as u32 + 1) - scroll_y;
+                            if bottom_y > DISPLAY_HEIGHT {
+                                scroll_y += bottom_y - DISPLAY_HEIGHT;
                             }
                         } else if partial_step_position <= -steps_per_increment {
                             selected_index = selected_index.saturating_sub(1);
                             partial_step_position = 0;
                             // scroll up if needed
-                            let top_y = font.character_size.height as i32 * selected_index as i32
+                            let top_y = FONT.character_size.height as i32 * selected_index as i32
                                 - scroll_y as i32;
                             if top_y < 0 {
                                 scroll_y -= (-top_y) as u32;
@@ -212,66 +157,7 @@ async fn main(spawner: Spawner) {
                         });
                     }
                 },
-                async {
-                    let mut ui_state = UiState::default();
-                    loop {
-                        display.clear(BinaryColor::Off).unwrap();
-                        for (index, option) in options.iter().enumerate() {
-                            let is_selected = ui_state.selected_index == index;
-                            Text::with_baseline(
-                                option,
-                                Point::new(
-                                    0,
-                                    index as i32 * font.character_size.height as i32
-                                        - ui_state.scroll_y as i32,
-                                ),
-                                MonoTextStyleBuilder::new()
-                                    .font(font)
-                                    .text_color(if is_selected {
-                                        BinaryColor::Off
-                                    } else {
-                                        BinaryColor::On
-                                    })
-                                    .background_color(if is_selected {
-                                        BinaryColor::On
-                                    } else {
-                                        BinaryColor::Off
-                                    })
-                                    .build(),
-                                Baseline::Top,
-                            )
-                            .draw(&mut display)
-                            .unwrap();
-                        }
-                        // Draw the scrollbar
-                        let total_height = options.len() as f64 * font.character_size.height as f64;
-                        let display_height = display_size.height as f64;
-                        if total_height > display_height {
-                            let scrollbar_height =
-                                ((display_height / total_height * display_height) as u32).max(1);
-                            let scrollbar_y =
-                                (ui_state.scroll_y as f64 / total_height * display_height) as u32;
-                            let scrollbar_width = 1;
-                            Rectangle::new(
-                                Point::new(
-                                    (display_size.width - scrollbar_width) as i32,
-                                    scrollbar_y as i32,
-                                ),
-                                Size::new(scrollbar_width, scrollbar_height),
-                            )
-                            .into_styled(
-                                PrimitiveStyleBuilder::new()
-                                    .fill_color(BinaryColor::On)
-                                    .build(),
-                            )
-                            .draw(&mut display)
-                            .unwrap();
-                        }
-
-                        display.flush().await.unwrap();
-                        ui_state = signal.wait().await;
-                    }
-                },
+                render_display(p.I2C0, i2c_scl_gpio, i2c_sda_gpio, &signal),
             )
             .await;
         },
@@ -285,13 +171,6 @@ async fn main(spawner: Spawner) {
                     info!("rotary button level: {}", debouncer.value());
                 }
             }
-        },
-        async {
-            // let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
-            // loop {
-            //     let direction = rotary_input.next().await;
-            //     info!("rotary direction: {}", direction);
-            // }
         },
         async {
             let mut flash = FlashStorage::new(p.FLASH);
