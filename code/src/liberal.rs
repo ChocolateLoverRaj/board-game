@@ -34,8 +34,8 @@ use trouble_host::prelude::*;
 
 use lib::{
     CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, Direction, EmbeddedStorageAsyncWrapper,
-    L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, LiberalStorage, PostcardValue, RotaryInput, SERVICE_UUID,
-    ScaleRgb,
+    L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, LiberalStorage, PostcardValue, RotaryInput, ScaleRgb,
+    ScanningEventHandler,
     liberal_renderer::{ConnectingUiState, ScanningState, UiState, render_display},
 };
 
@@ -205,33 +205,8 @@ async fn main(spawner: Spawner) {
                 .await;
             } else {
                 let channel = Channel::new();
-                struct MyEventHandler<'a> {
-                    channel: &'a Channel<CriticalSectionRawMutex, Address, 1>,
-                }
-                impl EventHandler for MyEventHandler<'_> {
-                    fn on_adv_reports(&self, reports: LeAdvReportsIter) {
-                        if let Some(report) = reports.filter_map(Result::ok).find(|report| {
-                            AdStructure::decode(report.data).filter_map(Result::ok).any(
-                                |ad_structure| {
-                                    if let AdStructure::ServiceUuids128(uuids) = ad_structure {
-                                        uuids.contains(SERVICE_UUID.as_raw().try_into().unwrap())
-                                    } else {
-                                        false
-                                    }
-                                },
-                            )
-                        }) {
-                            if let Err(e) = self.channel.try_send(Address {
-                                addr: report.addr,
-                                kind: report.addr_kind,
-                            }) {
-                                warn!("error sending: {}", e);
-                            };
-                        }
-                    }
-                }
                 let selected_address = match select(
-                    runner.run_with_handler(&MyEventHandler { channel: &channel }),
+                    runner.run_with_handler(&ScanningEventHandler { channel: &channel }),
                     async {
                         let mut scanning_state = ScanningState::default();
                         signal.signal(UiState::Scanning(scanning_state.clone()));
