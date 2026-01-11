@@ -1,15 +1,16 @@
 #![no_std]
 #![no_main]
 
-use defmt::{info, warn};
+use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::{join::*, select::*};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant};
 use embedded_graphics::{
-    mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_10X20},
+    mono_font::{MonoTextStyleBuilder, iso_8859_16::FONT_7X14},
     pixelcolor::BinaryColor,
     prelude::*,
+    primitives::{PrimitiveStyleBuilder, Rectangle},
     text::{Baseline, Text},
 };
 use esp_backtrace as _;
@@ -38,9 +39,9 @@ use smart_leds::{RGB8, SmartLedsWriteAsync};
 use trouble_host::prelude::*;
 
 use lib::{
-    CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
-    LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, RotaryInput,
-    SERVICE_UUID, ScaleRgb,
+    CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, Direction, EmbeddedStorageAsyncWrapper,
+    L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES,
+    RotaryInput, SERVICE_UUID, ScaleRgb,
 };
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, prelude::DisplayRotation, prelude::*,
@@ -141,22 +142,138 @@ async fn main(spawner: Spawner) {
             )
             .into_buffered_graphics_mode();
             display.init().await.unwrap();
-            let text_style = MonoTextStyleBuilder::new()
-                .font(&FONT_10X20)
-                .text_color(BinaryColor::On)
-                .build();
-            Text::with_baseline(
-                "Secret Hitler\nLiberal Board",
-                Point::zero(),
-                text_style,
-                Baseline::Top,
+
+            #[derive(Debug, Default)]
+            struct UiState {
+                selected_index: usize,
+                scroll_y: u32,
+            }
+            let signal = Signal::<CriticalSectionRawMutex, UiState>::new();
+            let font = &FONT_7X14;
+            let options = [
+                "Back",
+                "00:00:00:00:00:00",
+                "11:11:11:11:11:11",
+                "22:22:22:22:22:22",
+                "33:33:33:33:33:33",
+                "44:44:44:44:44:44",
+                "55:55:55:55:55:55",
+                "66:66:66:66:66:66",
+                "77:77:77:77:77:77",
+                "88:88:88:88:88:88",
+                "99:99:99:99:99:99",
+                "AA:AA:AA:AA:AA:AA",
+                "BB:BB:BB:BB:BB:BB",
+                "CC:CC:CC:CC:CC:CC",
+                "DD:DD:DD:DD:DD:DD",
+                "EE:EE:EE:EE:EE:EE",
+                "FF:FF:FF:FF:FF:FF",
+            ];
+            let display_size = display.size();
+            join(
+                async {
+                    let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
+                    let mut partial_step_position = 0;
+                    let mut selected_index = 0_usize;
+                    let mut scroll_y = 0;
+                    // 2 is naturally how the rotary encoder physically "snaps"
+                    let steps_per_increment = 2;
+                    loop {
+                        let direction = rotary_input.next().await;
+                        info!("rotary direction: {}", direction);
+                        partial_step_position += match direction {
+                            Direction::Clockwise => 1,
+                            Direction::CounterClockwise => -1,
+                        };
+                        if partial_step_position >= steps_per_increment {
+                            selected_index =
+                                selected_index.saturating_add(1).min(options.len() - 1);
+                            partial_step_position = 0;
+                            // scroll down if needed
+                            let bottom_y =
+                                font.character_size.height * (selected_index as u32 + 1) - scroll_y;
+                            let display_height = display_size.height;
+                            if bottom_y > display_height {
+                                scroll_y += bottom_y - display_height;
+                            }
+                        } else if partial_step_position <= -steps_per_increment {
+                            selected_index = selected_index.saturating_sub(1);
+                            partial_step_position = 0;
+                            // scroll up if needed
+                            let top_y = font.character_size.height as i32 * selected_index as i32
+                                - scroll_y as i32;
+                            if top_y < 0 {
+                                scroll_y -= (-top_y) as u32;
+                            }
+                        }
+                        signal.signal(UiState {
+                            selected_index,
+                            scroll_y,
+                        });
+                    }
+                },
+                async {
+                    let mut ui_state = UiState::default();
+                    loop {
+                        display.clear(BinaryColor::Off).unwrap();
+                        for (index, option) in options.iter().enumerate() {
+                            let is_selected = ui_state.selected_index == index;
+                            Text::with_baseline(
+                                option,
+                                Point::new(
+                                    0,
+                                    index as i32 * font.character_size.height as i32
+                                        - ui_state.scroll_y as i32,
+                                ),
+                                MonoTextStyleBuilder::new()
+                                    .font(font)
+                                    .text_color(if is_selected {
+                                        BinaryColor::Off
+                                    } else {
+                                        BinaryColor::On
+                                    })
+                                    .background_color(if is_selected {
+                                        BinaryColor::On
+                                    } else {
+                                        BinaryColor::Off
+                                    })
+                                    .build(),
+                                Baseline::Top,
+                            )
+                            .draw(&mut display)
+                            .unwrap();
+                        }
+                        // Draw the scrollbar
+                        let total_height = options.len() as f64 * font.character_size.height as f64;
+                        let display_height = display_size.height as f64;
+                        if total_height > display_height {
+                            let scrollbar_height =
+                                ((display_height / total_height * display_height) as u32).max(1);
+                            let scrollbar_y =
+                                (ui_state.scroll_y as f64 / total_height * display_height) as u32;
+                            let scrollbar_width = 1;
+                            Rectangle::new(
+                                Point::new(
+                                    (display_size.width - scrollbar_width) as i32,
+                                    scrollbar_y as i32,
+                                ),
+                                Size::new(scrollbar_width, scrollbar_height),
+                            )
+                            .into_styled(
+                                PrimitiveStyleBuilder::new()
+                                    .fill_color(BinaryColor::On)
+                                    .build(),
+                            )
+                            .draw(&mut display)
+                            .unwrap();
+                        }
+
+                        display.flush().await.unwrap();
+                        ui_state = signal.wait().await;
+                    }
+                },
             )
-            .draw(&mut display)
-            .unwrap();
-            display.flush().await.unwrap();
-            // Turn off the display to not cause burn-in
-            Timer::after_secs(5).await;
-            display.set_display_on(false).await.unwrap();
+            .await;
         },
         async {
             let mut switch = Input::new(rotary_sw_gpio, InputConfig::default().with_pull(Pull::Up));
@@ -170,11 +287,11 @@ async fn main(spawner: Spawner) {
             }
         },
         async {
-            let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
-            loop {
-                let direction = rotary_input.next().await;
-                info!("rotary direction: {}", direction);
-            }
+            // let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
+            // loop {
+            //     let direction = rotary_input.next().await;
+            //     info!("rotary direction: {}", direction);
+            // }
         },
         async {
             let mut flash = FlashStorage::new(p.FLASH);
@@ -297,8 +414,10 @@ async fn main(spawner: Spawner) {
                         info!("Connection event: {:#?}", event);
                         match event {
                             ConnectionEvent::Disconnected { reason } => {
-                                if existing_bond_stored && reason == bt_hci::param::Status::AUTHENTICATION_FAILURE {
-                                    warn!("Could not connect with existing bond. We can delete it and create a new bond.");
+                                if existing_bond_stored
+                                    && reason == bt_hci::param::Status::AUTHENTICATION_FAILURE
+                                {
+                                    // warn!("Could not connect with existing bond. We can delete it and create a new bond.")
                                 } else {
                                     panic!("BLE connection disconnected. reason: {:?}", reason);
                                 }
