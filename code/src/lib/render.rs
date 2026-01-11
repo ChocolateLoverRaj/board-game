@@ -148,13 +148,13 @@ pub struct ScrollYElement<'a, D: DrawTarget, E> {
     pub scrollbar_color: D::Color,
 }
 
-// impl<D: DrawTarget, E> ScrollYElement<'_, D, E> {
-//     /// Returns the new `scroll_y` to do just enough scrolling for the entire element to be seen.
-//     /// `size` is the size of the bounding box this element will be drawn with.
-//     pub fn scroll_into_view(size: Size, element_index: usize) -> u32 {
-//         todo!()
-//     }
-// }
+impl<D: DrawTarget, E> ScrollYElement<'_, D, E> {
+    /// Returns the new `scroll_y` to do just enough scrolling for the entire element to be seen.
+    /// `size` is the size of the bounding box this element will be drawn with.
+    pub fn scroll_into_view(&self, size: Size, element: BoundingHeight) -> u32 {
+        todo!()
+    }
+}
 
 impl<D: DrawTarget, E: Element<D>> Element<D> for ScrollYElement<'_, D, E> {
     fn draw(
@@ -240,5 +240,28 @@ where
                 .map(|element| u32::try_from(element.height(width)).unwrap())
                 .sum(),
         )
+    }
+}
+
+#[derive(Debug, Format, Clone, Copy)]
+pub struct BoundingHeight {
+    pub y: u32,
+    pub height: u32,
+}
+
+impl<I> ListElement<I> {
+    pub fn bounding_box_of_element<D, E>(&self, width: u32, index: usize) -> BoundingHeight
+    where
+        D: DrawTarget,
+        E: Element<D>,
+        I: IntoIterator<Item = E> + Clone,
+    {
+        let mut elements = self.elements.clone().into_iter();
+        let mut y = 0;
+        for _ in 0..index {
+            y += u32::try_from(elements.next().unwrap().height(width)).unwrap();
+        }
+        let height = elements.next().unwrap().height(width).try_into().unwrap();
+        BoundingHeight { y, height }
     }
 }

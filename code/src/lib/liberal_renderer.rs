@@ -44,8 +44,41 @@ pub const SCANNING_BUFFER_LEN: usize = 4;
 #[derive(Debug, Format, Default, Clone)]
 pub struct ScanningState {
     pub peripherals: heapless::Vec<Address, SCANNING_BUFFER_LEN>,
-    pub selected_index: Option<usize>,
+    /// `0` is selecting the text that says "Scanning..."
+    /// `1..` is for selecting a bluetooth address
+    pub selected_index: usize,
     pub scroll_y: u32,
+}
+
+impl ScanningState {
+    pub fn list<'a>(&self) -> ListElement<impl IntoIterator<Item = impl Element<D<'a>>> + Clone> {
+        ListElement {
+            elements: self.peripherals.iter().enumerate().map(|(i, address)| {
+                let is_selected = self.selected_index == i + 1;
+                let address = address.clone();
+                TextElement {
+                    text: {
+                        let mut s = heapless::String::<{ 6 * 2 + (6 - 1) }>::new();
+                        write!(s, "{address}").unwrap();
+                        s
+                    },
+                    character_style: MonoTextStyleBuilder::new()
+                        .font(FONT)
+                        .text_color(if is_selected {
+                            BinaryColor::Off
+                        } else {
+                            BinaryColor::On
+                        })
+                        .background_color(if is_selected {
+                            BinaryColor::On
+                        } else {
+                            BinaryColor::Off
+                        })
+                        .build(),
+                }
+            }),
+        }
+    }
 }
 
 /// This means that we tried reusing a previously saved bond, but it didn't work.
@@ -174,16 +207,12 @@ async fn render_ui(display: &mut D<'_>, ui_state: UiState) {
                 .unwrap();
             }
         }
-        UiState::Scanning(ScanningState {
-            peripherals,
-            selected_index,
-            scroll_y,
-        }) => {
+        UiState::Scanning(state) => {
             ScrollYElement {
                 element: &FlexElement {
                     elements: &[
                         &{
-                            let is_selected = selected_index.is_none();
+                            let is_selected = state.selected_index == 0;
                             TextElement {
                                 text: "Scanning...",
                                 character_style: MonoTextStyleBuilder::new()
@@ -201,36 +230,11 @@ async fn render_ui(display: &mut D<'_>, ui_state: UiState) {
                                     .build(),
                             }
                         } as &dyn Element<D<'_>>,
-                        &ListElement {
-                            elements: peripherals.iter().enumerate().map(|(i, address)| {
-                                let is_selected = selected_index == Some(i);
-                                let address = address.clone();
-                                TextElement {
-                                    text: {
-                                        let mut s = heapless::String::<{ 6 * 2 + (6 - 1) }>::new();
-                                        write!(s, "{address}").unwrap();
-                                        s
-                                    },
-                                    character_style: MonoTextStyleBuilder::new()
-                                        .font(FONT)
-                                        .text_color(if is_selected {
-                                            BinaryColor::Off
-                                        } else {
-                                            BinaryColor::On
-                                        })
-                                        .background_color(if is_selected {
-                                            BinaryColor::On
-                                        } else {
-                                            BinaryColor::Off
-                                        })
-                                        .build(),
-                                }
-                            }),
-                        } as &dyn Element<D<'_>>,
+                        &state.list() as &dyn Element<D<'_>>,
                     ],
                     dynamic_element: None,
                 },
-                scroll_y,
+                scroll_y: state.scroll_y,
                 scrollbar_color: BinaryColor::On,
                 scrollbar_width: 1,
             }

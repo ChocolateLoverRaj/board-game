@@ -36,9 +36,7 @@ use lib::{
     CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, Direction, EmbeddedStorageAsyncWrapper,
     L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, LiberalStorage, PostcardValue, RotaryInput, SERVICE_UUID,
     ScaleRgb,
-    liberal_renderer::{
-        ConnectingUiState, DISPLAY_HEIGHT, FONT, ScanningState, UiState, render_display,
-    },
+    liberal_renderer::{ConnectingUiState, ScanningState, UiState, render_display},
 };
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -120,45 +118,7 @@ async fn main(spawner: Spawner) {
     let signal = Signal::<CriticalSectionRawMutex, _>::new();
     join4(
         render_display(p.I2C0, i2c_scl_gpio, i2c_sda_gpio, &signal),
-        async {
-            let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
-            let mut partial_step_position = 0;
-            let mut selected_index = 0_usize;
-            let mut scroll_y = 0;
-            // 2 is naturally how the rotary encoder physically "snaps"
-            let steps_per_increment = 2;
-            loop {
-                let direction = rotary_input.next().await;
-                info!("rotary direction: {}", direction);
-                partial_step_position += match direction {
-                    Direction::Clockwise => 1,
-                    Direction::CounterClockwise => -1,
-                };
-                if partial_step_position >= steps_per_increment {
-                    selected_index = selected_index.saturating_add(1).min(12345 - 1);
-                    partial_step_position = 0;
-                    // scroll down if needed
-                    let bottom_y =
-                        FONT.character_size.height * (selected_index as u32 + 1) - scroll_y;
-                    if bottom_y > DISPLAY_HEIGHT {
-                        scroll_y += bottom_y - DISPLAY_HEIGHT;
-                    }
-                } else if partial_step_position <= -steps_per_increment {
-                    selected_index = selected_index.saturating_sub(1);
-                    partial_step_position = 0;
-                    // scroll up if needed
-                    let top_y =
-                        FONT.character_size.height as i32 * selected_index as i32 - scroll_y as i32;
-                    if top_y < 0 {
-                        scroll_y -= (-top_y) as u32;
-                    }
-                }
-                // signal.signal(UiState {
-                //     selected_index,
-                //     scroll_y,
-                // });
-            }
-        },
+        async {},
         async {
             let mut switch = Input::new(rotary_sw_gpio, InputConfig::default().with_pull(Pull::Up));
             let mut debouncer = Debouncer::new(switch.level(), Duration::from_millis(1));
@@ -297,15 +257,48 @@ async fn main(spawner: Spawner) {
                             })
                             .await
                             .unwrap();
+                        let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
+                        let mut partial_step_position = 0;
+                        // 2 is naturally how the rotary encoder physically "snaps"
+                        let steps_per_increment = 2;
                         loop {
-                            // TODO: Maybe remove some peripherals if we haven't seen them for a while
-                            let address = channel.receive().await;
-                            if !scanning_state.peripherals.contains(&address) {
-                                if scanning_state.peripherals.is_full() {
-                                    scanning_state.peripherals.remove(0);
+                            match select(rotary_input.next(), channel.receive()).await {
+                                Either::First(direction) => {
+                                    info!("rotary direction: {}", direction);
+                                    partial_step_position += match direction {
+                                        Direction::Clockwise => 1,
+                                        Direction::CounterClockwise => -1,
+                                    };
+                                    let selected_index_changed =
+                                        if partial_step_position >= steps_per_increment {
+                                            scanning_state.selected_index = scanning_state
+                                                .selected_index
+                                                .saturating_add(1)
+                                                .min(1 + scanning_state.peripherals.len() - 1);
+                                            true
+                                        } else if partial_step_position <= -steps_per_increment {
+                                            scanning_state.selected_index =
+                                                scanning_state.selected_index.saturating_sub(1);
+                                            true
+                                        } else {
+                                            false
+                                        };
+                                    if selected_index_changed {
+                                        // TODO: Scroll into view
+                                        partial_step_position = 0;
+                                        signal.signal(UiState::Scanning(scanning_state.clone()));
+                                    }
                                 }
-                                scanning_state.peripherals.push(address).unwrap();
-                                signal.signal(UiState::Scanning(scanning_state.clone()));
+                                Either::Second(address) => {
+                                    // TODO: Maybe remove some peripherals if we haven't seen them for a while
+                                    if !scanning_state.peripherals.contains(&address) {
+                                        if scanning_state.peripherals.is_full() {
+                                            scanning_state.peripherals.remove(0);
+                                        }
+                                        scanning_state.peripherals.push(address).unwrap();
+                                        signal.signal(UiState::Scanning(scanning_state.clone()));
+                                    }
+                                }
                             }
                         }
                     },
