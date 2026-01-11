@@ -1,8 +1,6 @@
 #![no_std]
 #![no_main]
 
-use core::cell::RefCell;
-
 use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::{join::*, select::*};
@@ -27,7 +25,6 @@ use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffe
 use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
-use heapless::{Deque, index_set::FnvIndexSet};
 use sequential_storage::{
     cache::NoCache,
     map::{MapConfig, MapStorage},
@@ -37,11 +34,10 @@ use trouble_host::prelude::*;
 
 use lib::{
     CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, Direction, EmbeddedStorageAsyncWrapper,
-    L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, LiberalStorage, PSM_L2CAP_EXAMPLES, RotaryInput,
-    SERVICE_UUID, ScaleRgb,
+    L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, LiberalStorage, PostcardValue, RotaryInput, SERVICE_UUID,
+    ScaleRgb,
     liberal_renderer::{
-        ConnectingUiState, DISPLAY_HEIGHT, FONT, SCANNING_BUFFER_LEN, ScanningState, UiState,
-        render_display,
+        ConnectingUiState, DISPLAY_HEIGHT, FONT, ScanningState, UiState, render_display,
     },
 };
 
@@ -192,8 +188,8 @@ async fn main(spawner: Spawner) {
                 NoCache::new(),
             );
             let mut data_buffer = [Default::default(); DATA_BUFFER_LEN];
-            let mut stored_data = map_storage
-                .fetch_item::<LiberalStorage>(&mut data_buffer, &())
+            let stored_data = map_storage
+                .fetch_item::<PostcardValue<LiberalStorage>>(&mut data_buffer, &())
                 .await
                 .unwrap()
                 .unwrap_or_default();
@@ -243,7 +239,7 @@ async fn main(spawner: Spawner) {
                         is_auto: true,
                     });
                     signal.signal(ui_state);
-                    let connection = central
+                    let _connection = central
                         .connect(&ConnectConfig {
                             connect_params: Default::default(),
                             scan_config: ScanConfig {

@@ -1,6 +1,5 @@
 use bt_hci::param::BdAddr;
 use defmt::Format;
-use sequential_storage::map::{SerializationError, Value};
 use serde::{Deserialize, Serialize};
 use trouble_host::{
     BondInformation, Identity, IdentityResolvingKey, LongTermKey, prelude::SecurityLevel,
@@ -48,36 +47,18 @@ impl From<BondInformation> for StoredBondInformation {
     }
 }
 
+pub const STORED_BONDS_LEN: usize = 10;
+
 // Everything that's stored
 #[derive(Debug, Format, Default, Serialize, Deserialize)]
 pub struct LiberalStorage {
     pub last_connected_peripheral: Option<[u8; 6]>,
-    pub saved_bonds: heapless::Vec<StoredBondInformation, 10>,
+    pub saved_bonds: heapless::Vec<StoredBondInformation, STORED_BONDS_LEN>,
 }
 
-impl Value<'_> for LiberalStorage {
-    fn serialize_into(
-        &self,
-        buffer: &mut [u8],
-    ) -> Result<usize, sequential_storage::map::SerializationError> {
-        Ok(postcard::to_slice(self, buffer)
-            .map_err(|e| match e {
-                postcard::Error::SerializeBufferFull => SerializationError::BufferTooSmall,
-                _ => SerializationError::InvalidData,
-            })?
-            .len())
-    }
-
-    fn deserialize_from(buffer: &'_ [u8]) -> Result<(Self, usize), SerializationError>
-    where
-        Self: Sized,
-    {
-        let (value, unused_bytes) = postcard::take_from_bytes(buffer).map_err(|e| match e {
-            postcard::Error::DeserializeUnexpectedEnd => SerializationError::BufferTooSmall,
-            _ => SerializationError::InvalidFormat,
-        })?;
-        Ok((value, buffer.len() - unused_bytes.len()))
-    }
+#[derive(Debug, Format, Default, Serialize, Deserialize)]
+pub struct FascistStorage {
+    pub saved_bonds: heapless::Vec<StoredBondInformation, STORED_BONDS_LEN>,
 }
 
 /// This is an estimate
