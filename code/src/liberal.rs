@@ -1,10 +1,14 @@
 #![no_std]
 #![no_main]
 
-use defmt::info;
+use core::cell::RefCell;
+
+use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::{join::*, select::*};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
+};
 use embassy_time::{Duration, Instant};
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::partitions::{
@@ -23,6 +27,7 @@ use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffe
 use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
+use heapless::{Deque, index_set::FnvIndexSet};
 use sequential_storage::{
     cache::NoCache,
     map::{MapConfig, MapStorage},
@@ -32,9 +37,12 @@ use trouble_host::prelude::*;
 
 use lib::{
     CONNECTIONS_MAX, DATA_BUFFER_LEN, Debouncer, Direction, EmbeddedStorageAsyncWrapper,
-    L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES,
-    RotaryInput, SERVICE_UUID, ScaleRgb,
-    liberal_renderer::{DISPLAY_HEIGHT, FONT, OPTIONS, UiState, render_display},
+    L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, LiberalStorage, PSM_L2CAP_EXAMPLES, RotaryInput,
+    SERVICE_UUID, ScaleRgb,
+    liberal_renderer::{
+        ConnectingUiState, DISPLAY_HEIGHT, FONT, SCANNING_BUFFER_LEN, ScanningState, UiState,
+        render_display,
+    },
 };
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -113,53 +121,47 @@ async fn main(spawner: Spawner) {
 
     leds_adapter.write(led_colors).await.unwrap();
 
-    join3(
+    let signal = Signal::<CriticalSectionRawMutex, _>::new();
+    join4(
+        render_display(p.I2C0, i2c_scl_gpio, i2c_sda_gpio, &signal),
         async {
-            let signal = Signal::<CriticalSectionRawMutex, _>::new();
-            join(
-                async {
-                    let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
-                    let mut partial_step_position = 0;
-                    let mut selected_index = 0_usize;
-                    let mut scroll_y = 0;
-                    // 2 is naturally how the rotary encoder physically "snaps"
-                    let steps_per_increment = 2;
-                    loop {
-                        let direction = rotary_input.next().await;
-                        info!("rotary direction: {}", direction);
-                        partial_step_position += match direction {
-                            Direction::Clockwise => 1,
-                            Direction::CounterClockwise => -1,
-                        };
-                        if partial_step_position >= steps_per_increment {
-                            selected_index =
-                                selected_index.saturating_add(1).min(OPTIONS.len() - 1);
-                            partial_step_position = 0;
-                            // scroll down if needed
-                            let bottom_y =
-                                FONT.character_size.height * (selected_index as u32 + 1) - scroll_y;
-                            if bottom_y > DISPLAY_HEIGHT {
-                                scroll_y += bottom_y - DISPLAY_HEIGHT;
-                            }
-                        } else if partial_step_position <= -steps_per_increment {
-                            selected_index = selected_index.saturating_sub(1);
-                            partial_step_position = 0;
-                            // scroll up if needed
-                            let top_y = FONT.character_size.height as i32 * selected_index as i32
-                                - scroll_y as i32;
-                            if top_y < 0 {
-                                scroll_y -= (-top_y) as u32;
-                            }
-                        }
-                        signal.signal(UiState {
-                            selected_index,
-                            scroll_y,
-                        });
+            let mut rotary_input = RotaryInput::new(rotary_dt_gpio, rotary_clk_gpio);
+            let mut partial_step_position = 0;
+            let mut selected_index = 0_usize;
+            let mut scroll_y = 0;
+            // 2 is naturally how the rotary encoder physically "snaps"
+            let steps_per_increment = 2;
+            loop {
+                let direction = rotary_input.next().await;
+                info!("rotary direction: {}", direction);
+                partial_step_position += match direction {
+                    Direction::Clockwise => 1,
+                    Direction::CounterClockwise => -1,
+                };
+                if partial_step_position >= steps_per_increment {
+                    selected_index = selected_index.saturating_add(1).min(12345 - 1);
+                    partial_step_position = 0;
+                    // scroll down if needed
+                    let bottom_y =
+                        FONT.character_size.height * (selected_index as u32 + 1) - scroll_y;
+                    if bottom_y > DISPLAY_HEIGHT {
+                        scroll_y += bottom_y - DISPLAY_HEIGHT;
                     }
-                },
-                render_display(p.I2C0, i2c_scl_gpio, i2c_sda_gpio, &signal),
-            )
-            .await;
+                } else if partial_step_position <= -steps_per_increment {
+                    selected_index = selected_index.saturating_sub(1);
+                    partial_step_position = 0;
+                    // scroll up if needed
+                    let top_y =
+                        FONT.character_size.height as i32 * selected_index as i32 - scroll_y as i32;
+                    if top_y < 0 {
+                        scroll_y -= (-top_y) as u32;
+                    }
+                }
+                // signal.signal(UiState {
+                //     selected_index,
+                //     scroll_y,
+                // });
+            }
         },
         async {
             let mut switch = Input::new(rotary_sw_gpio, InputConfig::default().with_pull(Pull::Up));
@@ -173,6 +175,8 @@ async fn main(spawner: Spawner) {
             }
         },
         async {
+            let mut ui_state = UiState::default();
+
             let mut flash = FlashStorage::new(p.FLASH);
             let mut pt_mem = [0; PARTITION_TABLE_MAX_LEN];
             let pt = read_partition_table(&mut flash, &mut pt_mem).unwrap();
@@ -182,11 +186,17 @@ async fn main(spawner: Spawner) {
                 .unwrap();
             let nvs_partition = nvs.as_embedded_storage(&mut flash);
             let map_config = MapConfig::new(0..nvs_partition.partition_size() as u32);
-            let mut map_storage = MapStorage::<MapStorageKey, _, _>::new(
+            let mut map_storage = MapStorage::<(), _, _>::new(
                 EmbeddedStorageAsyncWrapper(nvs_partition),
                 map_config,
                 NoCache::new(),
             );
+            let mut data_buffer = [Default::default(); DATA_BUFFER_LEN];
+            let mut stored_data = map_storage
+                .fetch_item::<LiberalStorage>(&mut data_buffer, &())
+                .await
+                .unwrap()
+                .unwrap_or_default();
 
             let _trng_source = TrngSource::new(p.RNG, p.ADC1);
             let mut trng = Trng::try_new().unwrap();
@@ -209,16 +219,14 @@ async fn main(spawner: Spawner) {
                 .set_random_generator_seed(&mut trng)
                 .set_io_capabilities(IoCapabilities::DisplayYesNo);
 
-            let mut data_buffer = [Default::default(); DATA_BUFFER_LEN];
-            let mut iter = map_storage.fetch_all_items(&mut data_buffer).await.unwrap();
-            while let Some((key, &value)) = iter.next(&mut data_buffer).await.unwrap() {
-                let bond = MapStorageKeyValue { key, value }.into();
-                info!("found existing bond: {:#?}", bond);
-                stack.add_bond_information(bond).unwrap();
+            for saved_bond_information in stored_data.saved_bonds.iter().cloned() {
+                stack
+                    .add_bond_information(saved_bond_information.into())
+                    .unwrap();
             }
 
             let Host {
-                central,
+                mut central,
                 mut runner,
                 ..
             } = stack.build();
@@ -227,139 +235,187 @@ async fn main(spawner: Spawner) {
             // Currently, it matches the address used by the peripheral examples
             // let target: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
 
-            info!("Scanning for peripheral...");
-
-            let mut scanner = Scanner::new(central);
-            let signal = Signal::new();
-            struct MyEventHandler<'a> {
-                signal: &'a Signal<CriticalSectionRawMutex, Address>,
-            }
-            impl EventHandler for MyEventHandler<'_> {
-                fn on_adv_reports(&self, reports: LeAdvReportsIter) {
-                    if let Some(report) = reports.filter_map(Result::ok).find(|report| {
-                        AdStructure::decode(report.data).filter_map(Result::ok).any(
-                            |ad_structure| {
-                                if let AdStructure::ServiceUuids128(uuids) = ad_structure {
-                                    uuids.contains(SERVICE_UUID.as_raw().try_into().unwrap())
-                                } else {
-                                    false
-                                }
-                            },
-                        )
-                    }) {
-                        self.signal.signal(Address {
-                            addr: report.addr,
-                            kind: report.addr_kind,
-                        });
-                    }
-                }
-            }
-            let _ = join(
-                runner.run_with_handler(&MyEventHandler { signal: &signal }),
-                async {
-                    let session = scanner
-                        .scan(&ScanConfig {
-                            active: true,
-                            phys: PhySet::M1,
-                            interval: Duration::from_secs(1),
-                            window: Duration::from_secs(1),
-                            ..Default::default()
-                        })
-                        .await
-                        .unwrap();
-                    let address = signal.wait().await;
-                    drop(session);
-                    info!("Found a fascist board: {}. Done scanning.", address);
-                    let mut central = scanner.into_inner();
-                    let conn = central
+            if let Some(last_connected_peripheral) = &stored_data.last_connected_peripheral {
+                let _ = join(runner.run(), async {
+                    let address = BdAddr::new(*last_connected_peripheral);
+                    ui_state = UiState::Connecting(ConnectingUiState {
+                        address,
+                        is_auto: true,
+                    });
+                    signal.signal(ui_state);
+                    let connection = central
                         .connect(&ConnectConfig {
                             connect_params: Default::default(),
                             scan_config: ScanConfig {
-                                filter_accept_list: &[(address.kind, &address.addr)],
+                                filter_accept_list: &[(AddrKind::RANDOM, &address)],
                                 ..Default::default()
                             },
                         })
                         .await
                         .unwrap();
-                    // Only allow creating a new bond if we haven't connected to this peripheral before
-                    let existing_bond_stored = stack
-                        .get_bond_information()
-                        .iter()
-                        .any(|bond| bond.identity == conn.peer_identity());
-                    conn.set_bondable(!existing_bond_stored).unwrap();
-                    conn.request_security().unwrap();
-                    let bond = loop {
-                        let event = conn.next().await;
-                        info!("Connection event: {:#?}", event);
-                        match event {
-                            ConnectionEvent::Disconnected { reason } => {
-                                if existing_bond_stored
-                                    && reason == bt_hci::param::Status::AUTHENTICATION_FAILURE
-                                {
-                                    // warn!("Could not connect with existing bond. We can delete it and create a new bond.")
-                                } else {
-                                    panic!("BLE connection disconnected. reason: {:?}", reason);
-                                }
-                            }
-                            ConnectionEvent::PairingComplete {
-                                security_level: _,
-                                bond,
-                            } => {
-                                break bond;
-                            }
-                            ConnectionEvent::PassKeyDisplay(_) => {
-                                panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
-                            }
-                            ConnectionEvent::PassKeyConfirm(_) => {
-                                panic!("fascist board is DisplayOnly so unexpected PassKeyConfirm");
-                            }
-                            ConnectionEvent::PassKeyInput => {
-                                panic!("this board is DisplayYesNo so unexpected PassKeyInput");
-                            }
-                            ConnectionEvent::PairingFailed(e) => {
-                                panic!("pairing failed: {e:?}");
-                            }
-                            _ => {
-                                panic!("unexpected connection event");
-                            }
+                    ui_state = UiState::Connected(address);
+                    signal.signal(ui_state);
+                    core::future::pending::<()>().await;
+                })
+                .await;
+            } else {
+                let mut scanning_state = ScanningState::default();
+                signal.signal(UiState::Scanning(scanning_state.clone()));
+                let channel = Channel::new();
+                struct MyEventHandler<'a> {
+                    channel: &'a Channel<CriticalSectionRawMutex, Address, 1>,
+                }
+                impl EventHandler for MyEventHandler<'_> {
+                    fn on_adv_reports(&self, reports: LeAdvReportsIter) {
+                        if let Some(report) = reports.filter_map(Result::ok).find(|report| {
+                            AdStructure::decode(report.data).filter_map(Result::ok).any(
+                                |ad_structure| {
+                                    if let AdStructure::ServiceUuids128(uuids) = ad_structure {
+                                        uuids.contains(SERVICE_UUID.as_raw().try_into().unwrap())
+                                    } else {
+                                        false
+                                    }
+                                },
+                            )
+                        }) {
+                            if let Err(e) = self.channel.try_send(Address {
+                                addr: report.addr,
+                                kind: report.addr_kind,
+                            }) {
+                                warn!("error sending: {}", e);
+                            };
                         }
-                    };
-                    info!("bonded: {}", bond);
-                    if !existing_bond_stored && let Some(bond) = bond {
-                        info!("storing bond");
-                        let MapStorageKeyValue { key, value } = MapStorageKeyValue::from(bond);
-                        map_storage
-                            .store_item(&mut [Default::default(); DATA_BUFFER_LEN], &key, &&value)
+                    }
+                }
+                join(
+                    runner.run_with_handler(&MyEventHandler { channel: &channel }),
+                    async {
+                        let mut scanner = Scanner::new(central);
+                        let _session = scanner
+                            .scan(&ScanConfig {
+                                active: true,
+                                phys: PhySet::M1,
+                                interval: Duration::from_secs(1),
+                                window: Duration::from_secs(1),
+                                ..Default::default()
+                            })
                             .await
                             .unwrap();
-                    }
+                        loop {
+                            // TODO: Maybe remove some peripherals if we haven't seen them for a while
+                            let address = channel.receive().await;
+                            if !scanning_state.peripherals.contains(&address) {
+                                let is_first = scanning_state.peripherals.is_empty();
+                                if scanning_state.peripherals.is_full() {
+                                    scanning_state.peripherals.remove(0);
+                                }
+                                scanning_state.peripherals.push(address).unwrap();
+                                if is_first {
+                                    scanning_state.selected_index = Some(0);
+                                }
+                                signal.signal(UiState::Scanning(scanning_state.clone()));
+                            }
+                        }
+                    },
+                )
+                .await;
 
-                    info!("Connected, creating l2cap channel");
-                    const PAYLOAD_LEN: usize = 27;
-                    let config = L2capChannelConfig {
-                        mtu: Some(PAYLOAD_LEN as u16),
-                        ..Default::default()
-                    };
-                    let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
-                        .await
-                        .unwrap();
-                    info!("New l2cap channel created, sending some data!");
-                    for i in 0..10 {
-                        let tx = [i; PAYLOAD_LEN];
-                        ch1.send(&stack, &tx).await.unwrap();
-                    }
-                    info!("Sent data, waiting for them to be sent back");
-                    let mut rx = [0; PAYLOAD_LEN];
-                    for i in 0..10 {
-                        let len = ch1.receive(&stack, &mut rx).await.unwrap();
-                        assert_eq!(len, rx.len());
-                        assert_eq!(rx, [i; PAYLOAD_LEN]);
-                    }
+                // drop(session);
+                // info!("Found a fascist board: {}. Done scanning.", address);
+                // let mut central = scanner.into_inner();
+                // let conn = central
+                //     .connect(&ConnectConfig {
+                //         connect_params: Default::default(),
+                //         scan_config: ScanConfig {
+                //             filter_accept_list: &[(address.kind, &address.addr)],
+                //             ..Default::default()
+                //         },
+                //     })
+                //     .await
+                //     .unwrap();
+                // // Only allow creating a new bond if we haven't connected to this peripheral before
+                // let existing_bond_stored = stack
+                //     .get_bond_information()
+                //     .iter()
+                //     .any(|bond| bond.identity == conn.peer_identity());
+                // conn.set_bondable(!existing_bond_stored).unwrap();
+                // conn.request_security().unwrap();
+                // let bond = loop {
+                //     let event = conn.next().await;
+                //     info!("Connection event: {:#?}", event);
+                //     match event {
+                //         ConnectionEvent::Disconnected { reason } => {
+                //             if existing_bond_stored
+                //                 && reason == bt_hci::param::Status::AUTHENTICATION_FAILURE
+                //             {
+                //                 // warn!("Could not connect with existing bond. We can delete it and create a new bond.")
+                //             } else {
+                //                 panic!("BLE connection disconnected. reason: {:?}", reason);
+                //             }
+                //         }
+                //         ConnectionEvent::PairingComplete {
+                //             security_level: _,
+                //             bond,
+                //         } => {
+                //             break bond;
+                //         }
+                //         ConnectionEvent::PassKeyDisplay(_) => {
+                //             panic!("fascist board is DisplayOnly so unexpected PassKeyDisplay");
+                //         }
+                //         ConnectionEvent::PassKeyConfirm(_) => {
+                //             panic!("fascist board is DisplayOnly so unexpected PassKeyConfirm");
+                //         }
+                //         ConnectionEvent::PassKeyInput => {
+                //             panic!("this board is DisplayYesNo so unexpected PassKeyInput");
+                //         }
+                //         ConnectionEvent::PairingFailed(e) => {
+                //             panic!("pairing failed: {e:?}");
+                //         }
+                //         _ => {
+                //             panic!("unexpected connection event");
+                //         }
+                //     }
+                // };
+                // info!("bonded: {}", bond);
+                // if !existing_bond_stored && let Some(bond) = bond {
+                //     if stored_data.saved_bonds.is_full() {
+                //         stored_data.saved_bonds.remove(0);
+                //     }
+                //     stored_data.saved_bonds.push(bond.into()).unwrap();
+                //     map_storage
+                //         .store_item(
+                //             &mut [Default::default(); DATA_BUFFER_LEN],
+                //             &(),
+                //             &stored_data,
+                //         )
+                //         .await
+                //         .unwrap();
+                // }
 
-                    info!("Received successfully!");
-                },
-            )
-            .await;
+                // info!("Connected, creating l2cap channel");
+                // const PAYLOAD_LEN: usize = 27;
+                // let config = L2capChannelConfig {
+                //     mtu: Some(PAYLOAD_LEN as u16),
+                //     ..Default::default()
+                // };
+                // let mut ch1 = L2capChannel::create(&stack, &conn, PSM_L2CAP_EXAMPLES, &config)
+                //     .await
+                //     .unwrap();
+                // info!("New l2cap channel created, sending some data!");
+                // for i in 0..10 {
+                //     let tx = [i; PAYLOAD_LEN];
+                //     ch1.send(&stack, &tx).await.unwrap();
+                // }
+                // info!("Sent data, waiting for them to be sent back");
+                // let mut rx = [0; PAYLOAD_LEN];
+                // for i in 0..10 {
+                //     let len = ch1.receive(&stack, &mut rx).await.unwrap();
+                //     assert_eq!(len, rx.len());
+                //     assert_eq!(rx, [i; PAYLOAD_LEN]);
+                // }
+
+                // info!("Received successfully!");
+            };
         },
     )
     .await;

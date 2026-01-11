@@ -31,7 +31,7 @@ use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
 use lib::{
-    CONNECTIONS_MAX, DATA_BUFFER_LEN, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
+    CONNECTIONS_MAX, DATA_BUFFER_LEN, DrawWriter, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX,
     LED_BRIGHTNESS, MapStorageKey, MapStorageKeyValue, PSM_L2CAP_EXAMPLES, SERVICE_UUID, ScaleRgb,
 };
 use sequential_storage::{
@@ -135,36 +135,6 @@ async fn main(spawner: Spawner) {
                 .font(&FONT_7X14)
                 .text_color(BinaryColor::On)
                 .build();
-            struct DrawWriter<'a, D, S> {
-                display: &'a mut D,
-                position: Point,
-                character_style: S,
-            }
-            impl<'a, D, S> DrawWriter<'a, D, S> {
-                pub fn new(display: &'a mut D, position: Point, character_style: S) -> Self {
-                    Self {
-                        display,
-                        position,
-                        character_style,
-                    }
-                }
-            }
-            impl<D, S: TextRenderer + Clone> Write for DrawWriter<'_, D, S>
-            where
-                D: DrawTarget<Color = S::Color>,
-            {
-                fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                    self.position = Text::with_baseline(
-                        s,
-                        self.position,
-                        self.character_style.clone(),
-                        Baseline::Top,
-                    )
-                    .draw(self.display)
-                    .map_err(|_| core::fmt::Error)?;
-                    Ok(())
-                }
-            }
             let mut writer = DrawWriter::new(&mut display, Point::zero(), text_style);
             write!(writer, "{address}").unwrap();
             display.flush().await.unwrap();
