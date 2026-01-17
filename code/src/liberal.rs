@@ -2,6 +2,7 @@
 #![no_main]
 
 use defmt::info;
+use embassy_embedded_hal::adapter::BlockingAsync;
 use embassy_executor::Spawner;
 use embassy_futures::join::*;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -29,9 +30,8 @@ use smart_leds::{RGB8, SmartLedsWriteAsync};
 use trouble_host::prelude::*;
 
 use lib::{
-    CONNECTIONS_MAX, EmbeddedStorageAsyncWrapper, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS,
-    LIBERAL_DATA_BUFFER_LEN, LiberalStorage, PSM_L2CAP_EXAMPLES, PostcardValue, RotaryButton,
-    RotaryInput, ScaleRgb,
+    CONNECTIONS_MAX, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, LIBERAL_DATA_BUFFER_LEN, LiberalStorage,
+    PSM_L2CAP_EXAMPLES, PostcardValue, RotaryButton, RotaryInput, ScaleRgb,
     config::{AUTO_CONNECT, SAVE_BOND_INFO},
     liberal_renderer::{ConnectingUiState, UiState, render_display},
     scan_and_choose,
@@ -129,7 +129,7 @@ async fn main(spawner: Spawner) {
             let nvs_partition = nvs.as_embedded_storage(&mut flash);
             let map_config = MapConfig::new(0..nvs_partition.partition_size() as u32);
             let mut map_storage = MapStorage::<(), _, _>::new(
-                EmbeddedStorageAsyncWrapper(nvs_partition),
+                BlockingAsync::new(nvs_partition),
                 map_config,
                 NoCache::new(),
             );

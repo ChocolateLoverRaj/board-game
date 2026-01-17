@@ -1,5 +1,3 @@
-use core::num::NonZero;
-
 use embassy_time::Duration;
 
 /// Auto-connect to the last paired peripheral

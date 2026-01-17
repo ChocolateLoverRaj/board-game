@@ -4,6 +4,7 @@
 use core::fmt::Write;
 
 use defmt::info;
+use embassy_embedded_hal::adapter::BlockingAsync;
 use embassy_executor::Spawner;
 use embassy_futures::join::*;
 use embassy_time::{Duration, Timer};
@@ -30,9 +31,9 @@ use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
 use lib::{
-    CONNECTIONS_MAX, DrawWriter, EmbeddedStorageAsyncWrapper, FASCIST_DATA_BUFFER_LEN,
-    FascistStorage, L2CAP_CHANNELS_MAX, LED_BRIGHTNESS, PSM_L2CAP_EXAMPLES, PostcardValue,
-    SERVICE_UUID, ScaleRgb, config::SAVE_BOND_INFO,
+    CONNECTIONS_MAX, DrawWriter, FASCIST_DATA_BUFFER_LEN, FascistStorage, L2CAP_CHANNELS_MAX,
+    LED_BRIGHTNESS, PSM_L2CAP_EXAMPLES, PostcardValue, SERVICE_UUID, ScaleRgb,
+    config::SAVE_BOND_INFO,
 };
 use sequential_storage::{
     cache::NoCache,
@@ -157,7 +158,7 @@ async fn main(spawner: Spawner) {
             let nvs_partition = nvs.as_embedded_storage(&mut flash);
             let map_config = MapConfig::new(0..nvs_partition.partition_size() as u32);
             let mut map_storage = MapStorage::new(
-                EmbeddedStorageAsyncWrapper(nvs_partition),
+                BlockingAsync::new(nvs_partition),
                 map_config,
                 NoCache::new(),
             );

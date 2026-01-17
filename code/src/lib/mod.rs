@@ -2,7 +2,6 @@
 pub mod config;
 mod debouncer;
 mod draw_writer;
-mod embedded_storage_async_wrapper;
 pub mod liberal_renderer;
 mod postcard_value;
 mod render;
@@ -15,7 +14,6 @@ mod storage;
 
 pub use debouncer::*;
 pub use draw_writer::*;
-pub use embedded_storage_async_wrapper::*;
 pub use postcard_value::*;
 pub use render::*;
 pub use rotary_encoder::*;
@@ -40,5 +38,4 @@ pub const L2CAP_CHANNELS_MAX: usize = 3; // Signal + att + CoC
 // used for the BLE L2CAP examples.
 //
 // https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-60/out/en/host/logical-link-control-and-adaptation-protocol-specification.html#UUID-1ffdf913-7b8a-c7ba-531e-2a9c6f6da8fb
-//
 pub const PSM_L2CAP_EXAMPLES: u16 = 0x0081;

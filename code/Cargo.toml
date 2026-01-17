@@ -28,6 +28,7 @@ bench = false
 [dependencies]
 bt-hci = { version = "0.6.0", features = ["defmt"] }
 defmt = "1.0.1"
+embassy-embedded-hal = { version = "0.5.0", features = ["defmt"] }
 embassy-executor = "0.9.1"
 embassy-futures = { version = "0.1.2", features = ["defmt"] }
 embassy-sync = { version = "0.7.2", features = ["defmt"] }
