@@ -10,8 +10,10 @@ use crate::{SERVICE_UUID, liberal_renderer::SCANNING_BUFFER_LEN};
 
 pub const SCAN_CHANNEL_SIZE: usize = SCANNING_BUFFER_LEN;
 
+pub type ScanChannel = Channel<CriticalSectionRawMutex, Address, 1>;
+
 pub struct ScanningEventHandler<'a> {
-    pub channel: &'a Channel<CriticalSectionRawMutex, Address, 1>,
+    pub channel: &'a ScanChannel,
 }
 impl EventHandler for ScanningEventHandler<'_> {
     fn on_adv_reports(&self, reports: LeAdvReportsIter) {

@@ -1,7 +1,9 @@
 #![no_std]
+pub mod ble;
 pub mod config;
 mod debouncer;
 mod draw_writer;
+pub mod game_state;
 pub mod liberal_renderer;
 mod postcard_value;
 mod render;
@@ -39,3 +41,5 @@ pub const L2CAP_CHANNELS_MAX: usize = 3; // Signal + att + CoC
 //
 // https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-60/out/en/host/logical-link-control-and-adaptation-protocol-specification.html#UUID-1ffdf913-7b8a-c7ba-531e-2a9c6f6da8fb
 pub const PSM_L2CAP_EXAMPLES: u16 = 0x0081;
+
+pub const BLE_SLOTS: usize = 20;

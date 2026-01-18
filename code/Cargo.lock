@@ -1911,6 +1911,7 @@ dependencies = [
  "smart-leds",
  "ssd1306",
  "strum",
+ "strum_macros",
  "trouble-host",
  "zerocopy",
 ]
