@@ -1,7 +1,8 @@
-use defmt::warn;
+#![cfg_attr(not(feature = "std"), no_std)]
 use heapless::index_set::FnvIndexSet;
 use strum::VariantArray;
-use trouble_host::Address;
+use strum_macros::VariantArray;
+use trouble_host::prelude::BdAddr;
 
 pub const SCAN_LIST_SIZE: usize = 4;
 
@@ -13,13 +14,14 @@ pub enum ConnectState {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ConnectionStatus {
-    pub peripheral_address: Address,
+    pub peripheral_address: BdAddr,
     pub state: ConnectState,
 }
 
+#[derive(Debug)]
 pub enum ConnectionAction {
     Scan {
-        peripherals: heapless::Vec<Address, SCAN_LIST_SIZE>,
+        peripherals: heapless::Vec<BdAddr, SCAN_LIST_SIZE>,
     },
     Connect(ConnectionStatus),
 }
@@ -38,6 +40,7 @@ pub enum ScanningSelectedItem {
     Title,
 }
 
+#[derive(Debug)]
 pub enum BluetoothScreen {
     Scanning {
         scroll_y: u32,
@@ -57,17 +60,20 @@ pub enum MainMenuSelectedItem {
     Bluetooth,
 }
 
+#[derive(Debug)]
 pub struct MainMenuScreen {
     scroll_y: u32,
     /// See [`MainMenuSelectedItem`]
     selected_item: usize,
 }
 
+#[derive(Debug)]
 pub enum Screen {
     MainMenu(MainMenuScreen),
     Bluetooth(BluetoothScreen),
 }
 
+#[derive(Debug)]
 pub struct GameStateSettingUp {
     connection_action: ConnectionAction,
     screen: Screen,
@@ -83,7 +89,7 @@ pub enum HitlerState {
     Dead,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FascistAction {
     /// The president checks another player's party.
     CheckParty,
@@ -128,8 +134,16 @@ impl FascistAction {
     //         Self::Kill => false,
     //     }
     // }
+
+    pub fn can_clear_with_button_press(&self) -> bool {
+        match self {
+            Self::CheckParty | Self::ChooseNextPresident | Self::ExamineTop3 => true,
+            Self::Kill => false,
+        }
+    }
 }
 
+#[derive(Debug)]
 pub struct GameStatePlaying {
     /// The game has 5-10 players. Once the game is started, the number of players currently cannot be adjusted.
     /// However, we could in the future handle changing the number of players mid-game.
@@ -176,14 +190,37 @@ impl GameStatePlaying {
     // pub fn
 }
 
+#[derive(Debug)]
 pub enum GameState {
     SettingUp(GameStateSettingUp),
     Playing(GameStatePlaying),
 }
 
+impl GameState {
+    /// You can load a auto-connect address if you want
+    fn new(peripheral_address: Option<BdAddr>) -> Self {
+        Self::SettingUp(GameStateSettingUp {
+            connection_action: match peripheral_address {
+                Some(address) => ConnectionAction::Connect(ConnectionStatus {
+                    peripheral_address: address,
+                    state: ConnectState::Connecting,
+                }),
+                None => ConnectionAction::Scan {
+                    peripherals: Default::default(),
+                },
+            },
+            screen: Screen::MainMenu(MainMenuScreen {
+                scroll_y: 0,
+                selected_item: 0,
+            }),
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum BleAction {
     Scan,
-    MaintainConnection(Address),
+    MaintainConnection(BdAddr),
 }
 
 pub enum Input {
@@ -196,7 +233,7 @@ pub enum Input {
 pub const LIBERAL_POLICY_CARDS: usize = 6;
 pub const FASCIST_POLICY_CARDS: usize = 11;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuraLedColor {
     /// A blueish color for the liberal board and a reddish color for the fascist board, or something else if the theme is different
     BoardSpecific,
@@ -217,14 +254,14 @@ pub struct LedsDisplay {
     pub election_tracker_leds: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Team {
     Liberal,
     Fascist,
 }
 
 /// Uniquely identifies one of the 17 policy cards
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PolicyCardId {
     pub team: Team,
     pub id: usize,
@@ -239,8 +276,9 @@ pub const FASCIST_BOARD_SLOTS: usize = 6;
 /// Note that players can physically place policy cards on the wrong board, such as placing a liberal policy on the fascist board.
 #[derive(Debug, Clone)]
 pub struct DetectedPolicyCards {
-    pub liberal: FnvIndexSet<PolicyCardId, LIBERAL_BOARD_SLOTS>,
-    pub fascist: FnvIndexSet<PolicyCardId, FASCIST_BOARD_SLOTS>,
+    // FnvIndexSet requires a power of two for the capacity
+    pub liberal: FnvIndexSet<PolicyCardId, { LIBERAL_BOARD_SLOTS.next_power_of_two() }>,
+    pub fascist: FnvIndexSet<PolicyCardId, { FASCIST_BOARD_SLOTS.next_power_of_two() }>,
 }
 
 pub enum SecretRole {
@@ -294,12 +332,13 @@ impl GameState {
             .state = ConnectState::Connecting;
     }
 
-    pub fn ble_peripheral_found(&mut self, address: Address) {
+    pub fn ble_peripheral_found(&mut self, address: BdAddr) {
         match self {
             Self::SettingUp(state) => match &mut state.connection_action {
                 ConnectionAction::Scan { peripherals } => {
                     if let Err(address) = peripherals.push(address) {
-                        warn!(
+                        #[cfg(feature = "defmt")]
+                        defmt::warn!(
                             "Failed to push address {} to list of scanned peripherals because the list is full. Consider rebuilding with a larger max size.",
                             address
                         );
@@ -332,15 +371,15 @@ impl GameState {
                             }
                             ConnectionAction::Scan { peripherals: _ } => {
                                 state.screen = Screen::Bluetooth(BluetoothScreen::Scanning {
-                                    scroll_y: 0,
-                                    selected_item: 0,
+                                    scroll_y: 0, // TODO: make sure it's visible
+                                    selected_item: ScanningSelectedItem::Title as usize,
                                 });
                             }
                         },
                         MainMenuSelectedItem::Bluetooth => {
                             state.screen = Screen::Bluetooth(BluetoothScreen::Scanning {
-                                scroll_y: 0,
-                                selected_item: 0,
+                                scroll_y: 0, // TODO: make sure it's visible
+                                selected_item: ScanningSelectedItem::Title as usize,
                             });
                         }
                     },
@@ -388,8 +427,9 @@ impl GameState {
                                     });
                                 state.screen =
                                     Screen::Bluetooth(BluetoothScreen::ConnectingConnected {
-                                        scroll_y: 0,
-                                        selected_item: 0,
+                                        scroll_y: 0, // TODO: make sure it's visible
+                                        selected_item: ConnectingConnectedSelectedItem::Title
+                                            as usize,
                                     });
                             }
                         }
@@ -446,7 +486,15 @@ impl GameState {
                     }
                 }
             },
-            Self::Playing(_) => {}
+            Self::Playing(state) => {
+                if state.pending_action
+                    && latest_action(state.players, state.fascist_policies_placed)
+                        .unwrap()
+                        .can_clear_with_button_press()
+                {
+                    state.pending_action = false;
+                }
+            }
         }
     }
 
@@ -533,11 +581,335 @@ impl GameState {
                 unreachable!("should not care about scanned dead character cards during setup")
             }
         };
-        match character.secret_role {
-            SecretRole::Hitler => {
-                state.hitler_state = HitlerState::Dead;
+        if latest_action(state.players, state.fascist_policies_placed) == Some(FascistAction::Kill)
+            && state.pending_action
+        {
+            match character.secret_role {
+                SecretRole::Hitler => {
+                    state.hitler_state = HitlerState::Dead;
+                }
+                _ => {}
             }
-            _ => {}
+            state.pending_action = false;
+        } else {
+            #[cfg(feature = "defmt")]
+            defmt::warn!("Processed dead character {} when no one should have been killed.");
         }
+    }
+
+    pub fn display_action_hint(&self) -> Option<FascistAction> {
+        match self {
+            Self::Playing(state) => {
+                if state.pending_action {
+                    latest_action(state.players, state.fascist_policies_placed)
+                } else {
+                    None
+                }
+            }
+            Self::SettingUp(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use trouble_host::prelude::BdAddr;
+
+    use super::*;
+
+    #[test]
+    fn six_fascist_policies() {
+        let mut state = GameState::new(None);
+        // Enter bluetooth menu
+        state.process_input(Input::Down);
+        state.process_input(Input::Click);
+
+        // Simulate a bluetooth device showing up
+        assert_eq!(state.ble_action(), BleAction::Scan);
+        let address = BdAddr::new([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+        state.ble_peripheral_found(address);
+
+        // Select that bluetooth device
+        state.process_input(Input::Down);
+        state.process_input(Input::Click);
+
+        // Go back to main menu
+        state.process_input(Input::Up);
+        state.process_input(Input::Click);
+
+        // Start the game
+        state.process_input(Input::Up);
+        state.process_input(Input::Click);
+
+        assert!(matches!(state, GameState::Playing(_)));
+        assert_eq!(state.ble_action(), BleAction::MaintainConnection(address));
+        assert_eq!(state.should_scan_cards(), true);
+
+        // A fascist policy is placed
+        state.update_scanned_policy_cards(DetectedPolicyCards {
+            liberal: [].into_iter().collect(),
+            fascist: [PolicyCardId {
+                team: Team::Fascist,
+                id: 0,
+            }]
+            .into_iter()
+            .collect(),
+        });
+        // The hint should show up
+        assert_eq!(state.display_action_hint(), Some(FascistAction::CheckParty));
+        // Manually dismiss the hint
+        state.process_input(Input::Click);
+        assert_eq!(state.display_action_hint(), None);
+
+        // A liberal policy is placed
+        state.update_scanned_policy_cards(DetectedPolicyCards {
+            liberal: [PolicyCardId {
+                team: Team::Liberal,
+                id: 0,
+            }]
+            .into_iter()
+            .collect(),
+            fascist: [PolicyCardId {
+                team: Team::Fascist,
+                id: 0,
+            }]
+            .into_iter()
+            .collect(),
+        });
+        assert_eq!(state.display_action_hint(), None);
+
+        // Fascist policy placed
+        state.update_scanned_policy_cards(DetectedPolicyCards {
+            liberal: [PolicyCardId {
+                team: Team::Liberal,
+                id: 0,
+            }]
+            .into_iter()
+            .collect(),
+            fascist: [
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 1,
+                },
+            ]
+            .into_iter()
+            .collect(),
+        });
+        // The hint should show up
+        assert_eq!(state.display_action_hint(), Some(FascistAction::CheckParty));
+        // Manually dismiss the hint
+        state.process_input(Input::Click);
+        assert_eq!(state.display_action_hint(), None);
+
+        // Liberal policy placed
+        state.update_scanned_policy_cards(DetectedPolicyCards {
+            liberal: [
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 1,
+                },
+            ]
+            .into_iter()
+            .collect(),
+            fascist: [
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 1,
+                },
+            ]
+            .into_iter()
+            .collect(),
+        });
+        assert_eq!(state.display_action_hint(), None);
+
+        // Fascist policy placed
+        state.update_scanned_policy_cards(DetectedPolicyCards {
+            liberal: [
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 1,
+                },
+            ]
+            .into_iter()
+            .collect(),
+            fascist: [
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 1,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 2,
+                },
+            ]
+            .into_iter()
+            .collect(),
+        });
+        // The hint should show up
+        assert_eq!(
+            state.display_action_hint(),
+            Some(FascistAction::ChooseNextPresident)
+        );
+        // Manually dismiss the hint
+        state.process_input(Input::Click);
+        assert_eq!(state.display_action_hint(), None);
+
+        // Fascist policy placed
+        state.update_scanned_policy_cards(DetectedPolicyCards {
+            liberal: [
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 1,
+                },
+            ]
+            .into_iter()
+            .collect(),
+            fascist: [
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 1,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 2,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 3,
+                },
+            ]
+            .into_iter()
+            .collect(),
+        });
+        // The hint should show up
+        assert_eq!(state.display_action_hint(), Some(FascistAction::Kill));
+        // A liberal is killed
+        state.process_dead_character(CharacterCardId {
+            secret_role: SecretRole::Liberal,
+            id: 0,
+        });
+        assert_eq!(state.display_action_hint(), None);
+
+        // Fascist policy placed
+        state.update_scanned_policy_cards(DetectedPolicyCards {
+            liberal: [
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 1,
+                },
+            ]
+            .into_iter()
+            .collect(),
+            fascist: [
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 1,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 2,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 3,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 4,
+                },
+            ]
+            .into_iter()
+            .collect(),
+        });
+        // The hint should show up
+        assert_eq!(state.display_action_hint(), Some(FascistAction::Kill));
+        // A fascist is killed
+        state.process_dead_character(CharacterCardId {
+            secret_role: SecretRole::Fascist,
+            id: 0,
+        });
+        assert_eq!(state.display_action_hint(), None);
+
+        // Fascist policy placed
+        state.update_scanned_policy_cards(DetectedPolicyCards {
+            liberal: [
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Liberal,
+                    id: 1,
+                },
+            ]
+            .into_iter()
+            .collect(),
+            fascist: [
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 0,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 1,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 2,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 3,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 4,
+                },
+                PolicyCardId {
+                    team: Team::Fascist,
+                    id: 5,
+                },
+            ]
+            .into_iter()
+            .collect(),
+        });
+        // Fascists win
+        assert_eq!(state.get_leds().aura_led_color, AuraLedColor::FascistWin);
     }
 }

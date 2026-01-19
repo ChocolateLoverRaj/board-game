@@ -3,7 +3,6 @@ pub mod ble;
 pub mod config;
 mod debouncer;
 mod draw_writer;
-pub mod game_state;
 pub mod liberal_renderer;
 mod postcard_value;
 mod render;
