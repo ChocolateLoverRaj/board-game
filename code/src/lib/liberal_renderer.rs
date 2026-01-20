@@ -1,8 +1,9 @@
 use bt_hci::param::BdAddr;
 use core::fmt::{Debug, Write};
 use defmt::Format;
+use embassy_embedded_hal::{SetConfig, shared_bus::asynch::i2c::I2cDeviceWithConfig};
 use embassy_futures::select::{Either, select};
-use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
+use embassy_sync::{blocking_mutex::raw::RawMutex, mutex::Mutex, signal::Signal};
 use embassy_time::{Instant, Timer};
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyleBuilder, iso_8859_16::FONT_7X14},
@@ -10,11 +11,8 @@ use embedded_graphics::{
     prelude::*,
     text::{Baseline, Text},
 };
-use esp_hal::{
-    gpio::interconnect::PeripheralOutput,
-    i2c::{self, master::I2c},
-    time::Rate,
-};
+use embedded_hal_async::i2c::I2c;
+use esp_hal::{i2c, time::Rate};
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, mode::DisplayConfigAsync, prelude::*,
     size::DisplaySize128x64,
@@ -51,7 +49,9 @@ pub struct ScanningState {
 }
 
 impl ScanningState {
-    pub fn list<'a>(&self) -> ListElement<impl IntoIterator<Item = impl Element<D<'a>>> + Clone> {
+    pub fn list<'a, I: I2c>(
+        &self,
+    ) -> ListElement<impl IntoIterator<Item = impl Element<D<'a, I>>> + Clone> {
         ListElement {
             elements: self.peripherals.iter().enumerate().map(|(i, address)| {
                 let is_selected = self.selected_index == i + 1;
@@ -112,13 +112,13 @@ pub enum UiState {
     ReuseSavedBondError(ReuseSavedBondErrorState),
 }
 
-type D<'a> = Ssd1306Async<
-    I2CInterface<I2c<'a, esp_hal::Async>>,
+type D<'a, I2c> = Ssd1306Async<
+    I2CInterface<I2c>,
     DisplaySize128x64,
     ssd1306::mode::BufferedGraphicsModeAsync<DisplaySize128x64>,
 >;
 
-async fn render_ui(display: &mut D<'_>, ui_state: UiState) {
+async fn render_ui<I: I2c>(display: &mut D<'_, I>, ui_state: UiState) {
     display.clear(BinaryColor::Off).unwrap();
     match ui_state {
         UiState::Loading => {
@@ -229,8 +229,8 @@ async fn render_ui(display: &mut D<'_>, ui_state: UiState) {
                                     })
                                     .build(),
                             }
-                        } as &dyn Element<D<'_>>,
-                        &state.list() as &dyn Element<D<'_>>,
+                        } as &dyn Element<D<'_, _>>,
+                        &state.list() as &dyn Element<D<'_, _>>,
                     ],
                     dynamic_element: None,
                 },
@@ -245,20 +245,16 @@ async fn render_ui(display: &mut D<'_>, ui_state: UiState) {
     display.flush().await.unwrap();
 }
 
-pub async fn render_display<'a>(
-    i2c: impl i2c::master::Instance + 'a,
-    scl: impl PeripheralOutput<'a>,
-    sda: impl PeripheralOutput<'a>,
+pub async fn render_display<'a, Bus>(
+    i2c: &Mutex<impl RawMutex, Bus>,
     signal: &Signal<impl RawMutex, UiState>,
-) {
-    let i2c = I2c::new(
+) where
+    Bus: I2c + SetConfig<Config = i2c::master::Config>,
+{
+    let i2c = I2cDeviceWithConfig::new(
         i2c,
         i2c::master::Config::default().with_frequency(Rate::from_khz(400)),
-    )
-    .unwrap()
-    .with_scl(scl)
-    .with_sda(sda)
-    .into_async();
+    );
     let mut display = Ssd1306Async::new(
         I2CDisplayInterface::new(i2c),
         DisplaySize128x64,

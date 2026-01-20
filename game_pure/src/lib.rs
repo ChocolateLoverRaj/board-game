@@ -126,15 +126,6 @@ fn latest_action(players: u8, fascist_policies_placed: usize) -> Option<FascistA
 }
 
 impl FascistAction {
-    // /// If the hint for this action is automatically cleared when a new policy card is placed or the vote is failed.
-    // pub fn can_clear_when_policy_placed(&self) -> bool {
-    //     match self {
-    //         Self::CheckParty => true,
-    //         Self::ChooseNextPresident => true,
-    //         Self::Kill => false,
-    //     }
-    // }
-
     pub fn can_clear_with_button_press(&self) -> bool {
         match self {
             Self::CheckParty | Self::ChooseNextPresident | Self::ExamineTop3 => true,
