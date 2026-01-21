@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 # Change stm32f103c8 to your chip name, if necessary.
-embassy-stm32 = { git = "https://github.com/embassy-rs/embassy", features = [
+embassy-stm32 = { path = "../../embassy/embassy-stm32", features = [
     "defmt",
     "stm32f103c8",
     "unstable-pac",
@@ -14,20 +14,18 @@ embassy-stm32 = { git = "https://github.com/embassy-rs/embassy", features = [
     "time-driver-any",
     "exti",
 ] }
-embassy-sync = { git = "https://github.com/embassy-rs/embassy", features = [
-    "defmt",
-] }
-embassy-executor = { git = "https://github.com/embassy-rs/embassy", features = [
+embassy-sync = { path = "../../embassy/embassy-sync", features = ["defmt"] }
+embassy-executor = { path = "../../embassy/embassy-executor", features = [
     "arch-cortex-m",
     "executor-thread",
     "defmt",
 ] }
-embassy-time = { git = "https://github.com/embassy-rs/embassy", features = [
+embassy-time = { path = "../../embassy/embassy-time", features = [
     "defmt",
     "defmt-timestamp-uptime",
     "tick-hz-32_768",
 ] }
-embassy-futures = { git = "https://github.com/embassy-rs/embassy" }
+embassy-futures = { path = "../../embassy/embassy-futures" }
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 cortex-m = { version = "0.7.6", features = [
@@ -40,6 +38,9 @@ panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 heapless = { version = "0.8", default-features = false }
 nb = "1.0.0"
 static_cell = "2.0.0"
+strum = { version = "0.27.2", default-features = false, features = ["derive"] }
+strum_macros = "0.27.2"
+rm = "0.3.2"
 
 [profile.dev]
 opt-level = "s"

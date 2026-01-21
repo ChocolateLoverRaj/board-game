@@ -1,32 +1,29 @@
 #![no_std]
 #![no_main]
-use core::{ptr, slice};
+mod mcp23017;
 
-use defmt::{info, warn};
+use crate::mcp23017::Mcp23017;
+use defmt::{error, info, warn};
 use embassy_executor::Spawner;
+use embassy_futures::select::select;
 use embassy_stm32::{
     bind_interrupts,
-    gpio::{Flex, Input, Output, Pull},
+    exti::{self, ExtiInput},
+    gpio::{ExtiPin, Pull},
     i2c::{self, I2c, SlaveAddrConfig, SlaveCommandKind},
-    peripherals,
+    interrupt,
+    peripherals::{self},
     time::khz,
 };
+
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
+    EXTI15_10  => exti::InterruptHandler<interrupt::typelevel::EXTI15_10>;
+    EXTI9_5  => exti::InterruptHandler<interrupt::typelevel::EXTI9_5>;
 });
-
-struct Mcp23017Pins<'a> {
-    gpio_a: [Flex<'a>; 8],
-    int_a: Output<'a>,
-    gpio_b: [Flex<'a>; 8],
-    int_b: Output<'a>,
-    /// If you can, directly use your micro controller's RESET pin.
-    /// We can also emulate a RESET pin.
-    reset: Input<'a>,
-}
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -43,11 +40,21 @@ async fn main(_spawner: Spawner) {
         base_address | least_significant_bits
     }));
 
-    let mut iocon_bank = false;
-    let mut selected_address = 0_u8;
+    // ExtiInput::new(p.PA6, p.EXTI6, Pull::Down, Irqs);
+    // ExtiInput::new(p.PA7, p.EXTI7, Pull::Down, Irqs);
+
+    let mut mcp23017 = Mcp23017::new(
+        p.PA0, p.PA1, p.PA2, p.PA3, p.PA4, p.PA5, p.PA6, p.PA7, p.PB0, p.PB1, p.PB3, p.PB4, p.PB5,
+        p.PB13, p.PB14, p.PA15, p.PA8, p.PB12, p.PB15, p.EXTI15, Irqs,
+    );
     loop {
         info!("Ready to receive I2C commands");
-        let command = match i2c.blocking_listen() {
+        use embassy_futures::select::Either::*;
+        let command = match select(mcp23017.run(), i2c.listen()).await {
+            First(_) => unreachable!(),
+            Second(command) => command,
+        };
+        let command = match command {
             Ok(command) => command,
             Err(e) => {
                 warn!("I2C error: {}", e);
@@ -55,38 +62,95 @@ async fn main(_spawner: Spawner) {
             }
         };
         match command.kind {
-            SlaveCommandKind::Read => {}
+            SlaveCommandKind::Read => {
+                let mut buffer = [Default::default(); 32];
+                mcp23017.prepare_read_buffer(&mut buffer);
+                let use_sync_respond_to_read = true;
+                let result = if use_sync_respond_to_read {
+                    i2c.blocking_respond_to_read(&buffer)
+                } else {
+                    i2c.respond_to_read(&buffer).await
+                };
+                let bytes_transmitted = match result {
+                    Err(e) => {
+                        warn!("I2C error: {}", e);
+                        continue;
+                    }
+                    Ok(bytes_transmitted) => bytes_transmitted,
+                };
+                if bytes_transmitted > buffer.len() {
+                    error!(
+                        "i2c controller read more bytes than we had prepared, so the controller read invalid data (zeros)."
+                    );
+                    continue;
+                }
+                mcp23017.confirm_bytes_read(bytes_transmitted);
+
+                // match i2c.transmit_byte_async(mcp23017.read_register()).await {
+                //     Err(e) => {
+                //         warn!("I2C error: {}", e);
+                //         break;
+                //     }
+                //     Ok(TransmitResult::Acknowledged) => {
+                //         info!("Responded to byte read, read transaction in progress.");
+                //         mcp23017.advance_address();
+                //     }
+                //     Ok(TransmitResult::NotAcknowledged) => {
+                //         info!("Sent byte, read transaction complete.");
+                //         mcp23017.advance_address();
+                //         break;
+                //     }
+                //     Ok(TransmitResult::Stopped | TransmitResult::Restarted) => {
+                //         info!(
+                //             "Transaction stopped, did not send byte. Not advancing address pointer."
+                //         );
+                //         break;
+                //     }
+                // }
+            }
             SlaveCommandKind::Write => {
-                // info!("I2C write command started");
-                selected_address = {
-                    let mut new_selected_address = Default::default();
-                    match i2c.blocking_respond_to_write(slice::from_mut(&mut new_selected_address))
-                    {
-                        Ok(bytes) => {
-                            info!("received {} bytes", bytes);
-                            new_selected_address
-                        }
-                        Err(e) => {
-                            warn!("I2C error: {}", e);
-                            continue;
-                        }
-                    }
+                let mut buffer = [Default::default(); 32];
+                let use_sync_respond_to_write = true;
+                let result = if use_sync_respond_to_write {
+                    i2c.blocking_respond_to_write(&mut buffer)
+                } else {
+                    i2c.respond_to_write(&mut buffer).await
                 };
-                info!("Selected address: {}", selected_address);
-                let value = {
-                    let mut value = Default::default();
-                    match i2c.blocking_respond_to_write(slice::from_mut(&mut value)) {
-                        Ok(bytes) => {
-                            info!("received {} bytes", bytes);
-                            value
-                        }
-                        Err(e) => {
-                            warn!("I2C error: {}", e);
-                            continue;
-                        }
+                let bytes_received = match result {
+                    Err(e) => {
+                        warn!("I2C error: {}", e);
+                        continue;
                     }
+                    Ok(bytes_received) => bytes_received,
                 };
-                info!("Value: {}", value);
+                mcp23017.process_write_transaction(&buffer[..bytes_received]);
+                // let selected_address = match i2c.receive_byte_sync() {
+                //     Err(e) => {
+                //         warn!("I2C error: {}", e);
+                //         continue;
+                //     }
+                //     Ok(ReceiveResult::Stopped | ReceiveResult::Restarted) => {
+                //         warn!("I2C transaction complete before receiving address");
+                //         continue;
+                //     }
+                //     Ok(ReceiveResult::Data(data)) => data,
+                // };
+                // mcp23017.set_address(selected_address);
+                // info!("selected address: {}", selected_address);
+                // loop {
+                //     let value = match i2c.receive_byte_sync() {
+                //         Err(e) => {
+                //             warn!("I2C error: {}", e);
+                //             break;
+                //         }
+                //         Ok(ReceiveResult::Stopped | ReceiveResult::Restarted) => {
+                //             break;
+                //         }
+                //         Ok(ReceiveResult::Data(data)) => data,
+                //     };
+                //     info!("value: {}", value);
+                //     mcp23017.write_register(value);
+                // }
             }
         }
     }
