@@ -1,20 +1,22 @@
 #![no_std]
 #![no_main]
-mod mcp23017;
+mod stm32_gpio_pin;
 
-use crate::mcp23017::Mcp23017;
 use defmt::{error, info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_stm32::{
     bind_interrupts,
     exti::{self, ExtiInput},
-    gpio::{ExtiPin, Pull},
+    gpio::{Flex, Pull, Speed},
     i2c::{self, I2c, SlaveAddrConfig, SlaveCommandKind},
     interrupt,
     peripherals::{self},
     time::khz,
 };
+use mcp23017_emulator::Mcp23017;
+
+use crate::stm32_gpio_pin::Stm32GpioPin;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -44,8 +46,25 @@ async fn main(_spawner: Spawner) {
     // ExtiInput::new(p.PA7, p.EXTI7, Pull::Down, Irqs);
 
     let mut mcp23017 = Mcp23017::new(
-        p.PA0, p.PA1, p.PA2, p.PA3, p.PA4, p.PA5, p.PA6, p.PA7, p.PB0, p.PB1, p.PB3, p.PB4, p.PB5,
-        p.PB13, p.PB14, p.PA15, p.PA8, p.PB12, p.PB15, p.EXTI15, Irqs,
+        [
+            Stm32GpioPin::new_flex(Flex::new(p.PB0), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA1), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA2), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA3), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA4), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA5), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA6), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PB1), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA7), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA8), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA9), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PA10), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PB11), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PB12), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PB13), Speed::Low),
+            Stm32GpioPin::new_flex(Flex::new(p.PB14), Speed::Low),
+        ],
+        ExtiInput::new(p.PB15, p.EXTI15, Pull::Up, Irqs),
     );
     loop {
         info!("Ready to receive I2C commands");
