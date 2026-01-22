@@ -2,10 +2,10 @@ use defmt::warn;
 use embassy_stm32::{
     Peri,
     exti::{Channel, ExtiInput, InterruptHandler},
-    gpio::{ExtiPin, Flex, Pull, Speed},
+    gpio::{ExtiPin, Flex, Level, Pull, Speed},
     interrupt::typelevel::Binding,
 };
-use mcp23017_emulator::{GpioPin, IoDirection};
+use mcp23017_emulator::{GpioPin, IoDirection, PinState};
 
 fn get_pull(pull_up_enabled: bool) -> Pull {
     if pull_up_enabled {
@@ -50,7 +50,7 @@ impl<'a> Stm32GpioPin<'a> {
 }
 
 impl GpioPin for Stm32GpioPin<'_> {
-    fn configure(&mut self, io_direction: IoDirection, pull_up_enabled: bool) {
+    fn configure(&mut self, io_direction: IoDirection, pull_up_enabled: bool, level: PinState) {
         match &mut self._type {
             Stm32GpioPinType::ExtiInput { pin: _, pull } => {
                 if io_direction == IoDirection::Input {
@@ -64,6 +64,7 @@ impl GpioPin for Stm32GpioPin<'_> {
             }
             Stm32GpioPinType::Flex { pin, speed } => match io_direction {
                 IoDirection::Output => {
+                    pin.set_level(Level::from(bool::from(level)));
                     pin.set_as_output(*speed);
                 }
                 IoDirection::Input => {

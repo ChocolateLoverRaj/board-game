@@ -1,3 +1,5 @@
+pub use embedded_hal::digital::PinState;
+
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoDirection {
@@ -25,6 +27,7 @@ impl From<IoDirection> for bool {
 }
 
 pub trait GpioPin {
-    fn configure(&mut self, io_direction: IoDirection, pull_up_enabled: bool);
+    fn configure(&mut self, io_direction: IoDirection, pull_up_enabled: bool, level: PinState);
+    /// This function will not be called if this pin is configured to be in output mode
     fn is_high(&mut self) -> bool;
 }

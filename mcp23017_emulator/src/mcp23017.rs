@@ -1,5 +1,6 @@
 use core::{iter::zip, mem, ops::Range};
 
+use embedded_hal::digital::PinState;
 use embedded_hal_async::digital::Wait;
 use strum::{AsRefStr, Display, EnumCount, FromRepr, VariantNames};
 
@@ -14,6 +15,7 @@ use crate::{
 enum PinProperty {
     IoDirection,
     PullUpEnabled,
+    IoLatch,
 }
 
 /// There are 8 GPIO pins for set A and set B
@@ -103,6 +105,7 @@ pub struct Mcp23017<P, R> {
     /// Corresponds to the `IODIR` bit
     io_directions: [IoDirection; N_TOTAL_GPIO_PINS],
     pull_up_enabled: [bool; N_TOTAL_GPIO_PINS],
+    output_latches: [PinState; N_TOTAL_GPIO_PINS],
 }
 
 impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
@@ -120,6 +123,7 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
             selected_address: 0,
             io_directions: [IoDirection::Input; _],
             pull_up_enabled: [false; _],
+            output_latches: [PinState::Low; _],
         };
         s.reset();
         s
@@ -131,6 +135,7 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
         self.selected_address = 0;
         self.io_directions = [IoDirection::Input; _];
         self.pull_up_enabled = [false; _];
+        self.output_latches = [PinState::Low; _];
         for i in 0..N_TOTAL_GPIO_PINS {
             self.update_pin(i);
         }
@@ -193,7 +198,11 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
     }
 
     fn update_pin(&mut self, pin_index: usize) {
-        self.gpio_pins[pin_index].configure(self.io_directions[pin_index], false);
+        self.gpio_pins[pin_index].configure(
+            self.io_directions[pin_index],
+            false,
+            self.output_latches[pin_index],
+        );
     }
 
     /// Writes the register based on the saved address
@@ -269,6 +278,40 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
                         self.update_pin(index);
                     });
             }
+            RegisterType::OLAT | RegisterType::GPIO => {
+                let new_io_directions = {
+                    let mut new_output_latches = self.output_latches;
+                    for (index, output_latch) in new_output_latches[register.ab.range()]
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        *output_latch = ((value & (1 << index)) != 0).into();
+                    }
+                    new_output_latches
+                };
+                let previous_output_latches =
+                    mem::replace(&mut self.output_latches, new_io_directions);
+                zip(previous_output_latches, self.output_latches)
+                    .enumerate()
+                    .filter_map(|(index, (pin_state, new_pin_state))| {
+                        if new_pin_state != pin_state {
+                            Some((index, new_pin_state))
+                        } else {
+                            None
+                        }
+                    })
+                    .for_each(|(index, pin_state)| {
+                        let property = PinProperty::IoLatch.as_ref();
+                        #[cfg(feature = "defmt")]
+                        defmt::info!(
+                            "{}.{:015} = {}",
+                            FormatPinIndex(index),
+                            property,
+                            defmt::Debug2Format(&pin_state)
+                        );
+                        self.update_pin(index);
+                    });
+            }
             register_type => todo!("write {register_type:?}"),
         }
     }
@@ -305,7 +348,10 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
                     .into_iter()
                     .enumerate()
                 {
-                    value |= u8::from(pin.is_high()) << i;
+                    value |= u8::from(match self.io_directions[i] {
+                        IoDirection::Output => self.output_latches[i].into(),
+                        IoDirection::Input => pin.is_high(),
+                    }) << i;
                 }
                 value
             }
