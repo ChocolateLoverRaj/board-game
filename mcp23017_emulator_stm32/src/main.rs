@@ -2,7 +2,7 @@
 #![no_main]
 mod stm32_gpio_pin;
 
-use defmt::{error, info, warn};
+use defmt::{debug, error, info, trace, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_stm32::{
@@ -67,7 +67,7 @@ async fn main(_spawner: Spawner) {
         ExtiInput::new(p.PB15, p.EXTI15, Pull::Up, Irqs),
     );
     loop {
-        info!("Ready to receive I2C commands");
+        trace!("Ready to receive I2C commands");
         use embassy_futures::select::Either::*;
         let command = match select(mcp23017.run(), i2c.listen()).await {
             First(_) => unreachable!(),
@@ -82,7 +82,7 @@ async fn main(_spawner: Spawner) {
         };
         match command.kind {
             SlaveCommandKind::Read => {
-                let mut buffer = [Default::default(); 32];
+                let mut buffer = [Default::default(); 1];
                 mcp23017.prepare_read_buffer(&mut buffer);
                 let use_sync_respond_to_read = true;
                 let result = if use_sync_respond_to_read {
@@ -106,7 +106,7 @@ async fn main(_spawner: Spawner) {
                 mcp23017.confirm_bytes_read(bytes_transmitted);
             }
             SlaveCommandKind::Write => {
-                let mut buffer = [Default::default(); 32];
+                let mut buffer = [Default::default(); 2];
                 let use_sync_respond_to_write = true;
                 let result = if use_sync_respond_to_write {
                     i2c.blocking_respond_to_write(&mut buffer)

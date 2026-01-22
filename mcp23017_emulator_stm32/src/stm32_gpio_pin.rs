@@ -1,4 +1,4 @@
-use defmt::warn;
+use defmt::{info, warn};
 use embassy_stm32::{
     Peri,
     exti::{Channel, ExtiInput, InterruptHandler},

@@ -44,6 +44,10 @@ impl AB {
         }
     }
 
+    pub fn starting_index(&self) -> usize {
+        self.set_index() * N_GPIO_PINS_PER_SET
+    }
+
     pub fn range(&self) -> Range<usize> {
         self.set_index() * N_GPIO_PINS_PER_SET..(self.set_index() + 1) * N_GPIO_PINS_PER_SET
     }
@@ -200,7 +204,7 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
     fn update_pin(&mut self, pin_index: usize) {
         self.gpio_pins[pin_index].configure(
             self.io_directions[pin_index],
-            false,
+            self.pull_up_enabled[pin_index],
             self.output_latches[pin_index],
         );
     }
@@ -245,35 +249,35 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
                     });
             }
             RegisterType::GPPU => {
-                let new_io_directions = {
-                    let mut new_io_directions = self.pull_up_enabled;
-                    for (index, io_direction) in new_io_directions[register.ab.range()]
+                let new_pull_up_enabled = {
+                    let mut new_pull_up_enabled = self.pull_up_enabled;
+                    for (index, pull_up_enabled) in new_pull_up_enabled[register.ab.range()]
                         .iter_mut()
                         .enumerate()
                     {
-                        *io_direction = (value & (1 << index)) != 0;
+                        *pull_up_enabled = (value & (1 << index)) != 0;
                     }
-                    new_io_directions
+                    new_pull_up_enabled
                 };
-                let previous_io_directions =
-                    mem::replace(&mut self.pull_up_enabled, new_io_directions);
-                zip(previous_io_directions, self.pull_up_enabled)
+                let previous_pull_up_enabled =
+                    mem::replace(&mut self.pull_up_enabled, new_pull_up_enabled);
+                zip(previous_pull_up_enabled, self.pull_up_enabled)
                     .enumerate()
-                    .filter_map(|(index, (io_direction, new_io_direction))| {
-                        if new_io_direction != io_direction {
-                            Some((index, new_io_direction))
+                    .filter_map(|(index, (previous_pull_up_enabled, pull_up_enabled))| {
+                        if pull_up_enabled != previous_pull_up_enabled {
+                            Some((index, pull_up_enabled))
                         } else {
                             None
                         }
                     })
-                    .for_each(|(index, new_io_direction)| {
+                    .for_each(|(index, new_pull_up_enabled)| {
                         let property = PinProperty::PullUpEnabled.as_ref();
                         #[cfg(feature = "defmt")]
                         defmt::info!(
                             "{}.{:015} = {}",
                             FormatPinIndex(index),
                             property,
-                            new_io_direction
+                            new_pull_up_enabled
                         );
                         self.update_pin(index);
                     });
@@ -348,8 +352,10 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
                     .into_iter()
                     .enumerate()
                 {
-                    value |= u8::from(match self.io_directions[i] {
-                        IoDirection::Output => self.output_latches[i].into(),
+                    value |= u8::from(match self.io_directions[i + register.ab.starting_index()] {
+                        IoDirection::Output => {
+                            self.output_latches[i + register.ab.starting_index()].into()
+                        }
                         IoDirection::Input => pin.is_high(),
                     }) << i;
                 }
