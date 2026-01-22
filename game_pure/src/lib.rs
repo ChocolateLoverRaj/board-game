@@ -1,7 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 use heapless::index_set::FnvIndexSet;
 use strum::VariantArray;
-use strum_macros::VariantArray;
 use trouble_host::prelude::BdAddr;
 
 pub const SCAN_LIST_SIZE: usize = 4;
@@ -54,7 +53,8 @@ pub enum BluetoothScreen {
     },
 }
 
-#[derive(VariantArray)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, VariantArray)]
 pub enum MainMenuSelectedItem {
     StartGame,
     Bluetooth,
@@ -62,9 +62,9 @@ pub enum MainMenuSelectedItem {
 
 #[derive(Debug)]
 pub struct MainMenuScreen {
-    scroll_y: u32,
+    pub scroll_y: u32,
     /// See [`MainMenuSelectedItem`]
-    selected_item: usize,
+    pub selected_item: usize,
 }
 
 #[derive(Debug)]
@@ -75,8 +75,8 @@ pub enum Screen {
 
 #[derive(Debug)]
 pub struct GameStateSettingUp {
-    connection_action: ConnectionAction,
-    screen: Screen,
+    pub connection_action: ConnectionAction,
+    pub screen: Screen,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -189,7 +189,7 @@ pub enum GameState {
 
 impl GameState {
     /// You can load a auto-connect address if you want
-    fn new(peripheral_address: Option<BdAddr>) -> Self {
+    pub fn new(peripheral_address: Option<BdAddr>) -> Self {
         Self::SettingUp(GameStateSettingUp {
             connection_action: match peripheral_address {
                 Some(address) => ConnectionAction::Connect(ConnectionStatus {
@@ -272,6 +272,8 @@ pub struct DetectedPolicyCards {
     pub fascist: FnvIndexSet<PolicyCardId, { FASCIST_BOARD_SLOTS.next_power_of_two() }>,
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug)]
 pub enum SecretRole {
     /// There are up to 6 liberals
     Liberal,
@@ -281,6 +283,8 @@ pub enum SecretRole {
     Hitler,
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug)]
 pub struct CharacterCardId {
     pub secret_role: SecretRole,
     pub id: usize,
@@ -584,7 +588,10 @@ impl GameState {
             state.pending_action = false;
         } else {
             #[cfg(feature = "defmt")]
-            defmt::warn!("Processed dead character {} when no one should have been killed.");
+            defmt::warn!(
+                "Processed dead character {} when no one should have been killed.",
+                character
+            );
         }
     }
 

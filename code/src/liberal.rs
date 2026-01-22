@@ -28,6 +28,7 @@ use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffe
 use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
+use game_pure::GameState;
 use sequential_storage::{
     cache::NoCache,
     map::{MapConfig, MapStorage},
@@ -40,7 +41,7 @@ use lib::{
     PSM_L2CAP_EXAMPLES, PostcardValue, RotaryButton, RotaryInput, ScaleRgb,
     ble::{Ble, BleRef0, BleRef1},
     config::{AUTO_CONNECT, SAVE_BOND_INFO},
-    liberal_renderer::{ConnectingUiState, UiState, render_display},
+    liberal_renderer::{ConnectingUiState, UiState, render_display, render_display_2},
     scan_and_choose,
 };
 
@@ -120,7 +121,7 @@ async fn main(spawner: Spawner) {
 
     leds_adapter.write(led_colors).await.unwrap();
 
-    // let signal = Signal::<CriticalSectionRawMutex, _>::new();
+    let signal = Signal::<CriticalSectionRawMutex, _>::new();
 
     let i2c = Mutex::<CriticalSectionRawMutex, _>::new(
         I2c::new(p.I2C0, i2c::master::Config::default())
@@ -130,35 +131,41 @@ async fn main(spawner: Spawner) {
             .into_async(),
     );
 
-    let mut mcp23017 = I2cDeviceWithConfig::new(
-        &i2c,
-        i2c::master::Config::default().with_frequency(Rate::from_khz(400)),
-    );
-    embedded_hal_async::i2c::I2c::write(&mut mcp23017, 0x20, &[10, 20])
-        .await
+    // let mut mcp23017 = I2cDeviceWithConfig::new(
+    //     &i2c,
+    //     i2c::master::Config::default().with_frequency(Rate::from_khz(400)),
+    // );
+
+    let mut flash = FlashStorage::new(p.FLASH);
+    let mut pt_mem = [0; PARTITION_TABLE_MAX_LEN];
+    let pt = read_partition_table(&mut flash, &mut pt_mem).unwrap();
+    let nvs = pt
+        .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))
+        .unwrap()
         .unwrap();
+    let nvs_partition = nvs.as_embedded_storage(&mut flash);
+    let map_config = MapConfig::new(0..nvs_partition.partition_size() as u32);
+    let mut map_storage = MapStorage::<(), _, _>::new(
+        BlockingAsync::new(nvs_partition),
+        map_config,
+        NoCache::new(),
+    );
+    let mut data_buffer = [Default::default(); LIBERAL_DATA_BUFFER_LEN];
+    let mut stored_data = map_storage
+        .fetch_item::<PostcardValue<LiberalStorage>>(&mut data_buffer, &())
+        .await
+        .unwrap()
+        .unwrap_or_default();
+
+    let mut game_state = GameState::new(if AUTO_CONNECT {
+        stored_data.last_connected_peripheral.map(BdAddr::new)
+    } else {
+        None
+    });
+    signal.signal(game_state);
+    render_display_2(&i2c, &signal).await;
 
     // join4(render_display(&i2c, &signal), async {}, async {}, async {
-    //     let mut flash = FlashStorage::new(p.FLASH);
-    //     let mut pt_mem = [0; PARTITION_TABLE_MAX_LEN];
-    //     let pt = read_partition_table(&mut flash, &mut pt_mem).unwrap();
-    //     let nvs = pt
-    //         .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))
-    //         .unwrap()
-    //         .unwrap();
-    //     let nvs_partition = nvs.as_embedded_storage(&mut flash);
-    //     let map_config = MapConfig::new(0..nvs_partition.partition_size() as u32);
-    //     let mut map_storage = MapStorage::<(), _, _>::new(
-    //         BlockingAsync::new(nvs_partition),
-    //         map_config,
-    //         NoCache::new(),
-    //     );
-    //     let mut data_buffer = [Default::default(); LIBERAL_DATA_BUFFER_LEN];
-    //     let mut stored_data = map_storage
-    //         .fetch_item::<PostcardValue<LiberalStorage>>(&mut data_buffer, &())
-    //         .await
-    //         .unwrap()
-    //         .unwrap_or_default();
 
     //     let _trng_source = TrngSource::new(p.RNG, p.ADC1);
     //     let mut trng = Trng::try_new().unwrap();
