@@ -85,28 +85,6 @@ async fn main(_spawner: Spawner) {
                     continue;
                 }
                 mcp23017.confirm_bytes_read(bytes_transmitted);
-
-                // match i2c.transmit_byte_async(mcp23017.read_register()).await {
-                //     Err(e) => {
-                //         warn!("I2C error: {}", e);
-                //         break;
-                //     }
-                //     Ok(TransmitResult::Acknowledged) => {
-                //         info!("Responded to byte read, read transaction in progress.");
-                //         mcp23017.advance_address();
-                //     }
-                //     Ok(TransmitResult::NotAcknowledged) => {
-                //         info!("Sent byte, read transaction complete.");
-                //         mcp23017.advance_address();
-                //         break;
-                //     }
-                //     Ok(TransmitResult::Stopped | TransmitResult::Restarted) => {
-                //         info!(
-                //             "Transaction stopped, did not send byte. Not advancing address pointer."
-                //         );
-                //         break;
-                //     }
-                // }
             }
             SlaveCommandKind::Write => {
                 let mut buffer = [Default::default(); 32];
@@ -124,33 +102,6 @@ async fn main(_spawner: Spawner) {
                     Ok(bytes_received) => bytes_received,
                 };
                 mcp23017.process_write_transaction(&buffer[..bytes_received]);
-                // let selected_address = match i2c.receive_byte_sync() {
-                //     Err(e) => {
-                //         warn!("I2C error: {}", e);
-                //         continue;
-                //     }
-                //     Ok(ReceiveResult::Stopped | ReceiveResult::Restarted) => {
-                //         warn!("I2C transaction complete before receiving address");
-                //         continue;
-                //     }
-                //     Ok(ReceiveResult::Data(data)) => data,
-                // };
-                // mcp23017.set_address(selected_address);
-                // info!("selected address: {}", selected_address);
-                // loop {
-                //     let value = match i2c.receive_byte_sync() {
-                //         Err(e) => {
-                //             warn!("I2C error: {}", e);
-                //             break;
-                //         }
-                //         Ok(ReceiveResult::Stopped | ReceiveResult::Restarted) => {
-                //             break;
-                //         }
-                //         Ok(ReceiveResult::Data(data)) => data,
-                //     };
-                //     info!("value: {}", value);
-                //     mcp23017.write_register(value);
-                // }
             }
         }
     }
