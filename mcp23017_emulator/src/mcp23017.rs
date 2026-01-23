@@ -165,7 +165,7 @@ pub struct Mcp23017<P, I, R> {
     interrupt_control: [InterruptControl; N_TOTAL_GPIO_PINS],
     /// Can only be cleared by reading the GPIO or captured pin state
     int_flags: [bool; N_TOTAL_GPIO_PINS],
-    interrupt_captured_values: [PinState; N_TOTAL_GPIO_PINS],
+    int_captured_value: [PinState; N_TOTAL_GPIO_PINS],
 }
 
 impl<P: GpioPin, I: InterruptPin, R: Wait> Mcp23017<P, I, R> {
@@ -192,7 +192,7 @@ impl<P: GpioPin, I: InterruptPin, R: Wait> Mcp23017<P, I, R> {
             int_compare: [PinState::Low; _],
             interrupt_control: [InterruptControl::CompareWithPreviousValue; _],
             int_flags: [false; _],
-            interrupt_captured_values: [PinState::Low; _],
+            int_captured_value: [PinState::Low; _],
         };
         s.update_all_pins();
         s.update_interrupts();
@@ -215,7 +215,7 @@ impl<P: GpioPin, I: InterruptPin, R: Wait> Mcp23017<P, I, R> {
         self.int_compare = [PinState::Low; _];
         self.interrupt_control = [InterruptControl::CompareWithPreviousValue; _];
         self.int_flags = [false; _];
-        self.interrupt_captured_values = [PinState::Low; _];
+        self.int_captured_value = [PinState::Low; _];
         self.update_all_pins();
         self.update_interrupts();
     }
@@ -626,7 +626,9 @@ impl<P: GpioPin, I: InterruptPin, R: Wait> Mcp23017<P, I, R> {
                                         self.int_compare[i]
                                     }
                                     InterruptControl::CompareWithPreviousValue => {
-                                        todo!("what is the previous value to compare with?")
+                                        // the docs are unclear about what the "previous value" is
+                                        // i'm going to assume it's the previously captured value
+                                        self.int_captured_value[i]
                                     }
                                 };
                                 if pin.can_wait() {
@@ -672,7 +674,7 @@ impl<P: GpioPin, I: InterruptPin, R: Wait> Mcp23017<P, I, R> {
                         defmt::Debug2Format(&level)
                     );
                     self.int_flags[index] = true;
-                    self.interrupt_captured_values[index] = level;
+                    self.int_captured_value[index] = level;
                     self.update_interrupts();
                 }
             };
