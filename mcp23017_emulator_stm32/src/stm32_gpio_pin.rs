@@ -5,7 +5,7 @@ use embassy_stm32::{
     gpio::{ExtiPin, Flex, Level, Pull, Speed},
     interrupt::typelevel::Binding,
 };
-use mcp23017_emulator::{GpioPin, IoDirection, PinState};
+use mcp23017_emulator::{GpioPin, InterruptMode, InterruptPin, IoDirection, PinState};
 
 fn get_pull(pull_up_enabled: bool) -> Pull {
     if pull_up_enabled {
@@ -74,10 +74,53 @@ impl GpioPin for Stm32GpioPin<'_> {
         }
     }
 
-    fn is_high(&mut self) -> bool {
+    fn level(&mut self) -> PinState {
+        bool::from(match &mut self._type {
+            Stm32GpioPinType::ExtiInput { pin, pull: _ } => pin.get_level(),
+            Stm32GpioPinType::Flex { pin, speed: _ } => pin.get_level(),
+        })
+        .into()
+    }
+
+    fn can_wait(&mut self) -> bool {
+        match &self._type {
+            Stm32GpioPinType::ExtiInput { pin: _, pull: _ } => true,
+            Stm32GpioPinType::Flex { pin: _, speed: _ } => false,
+        }
+    }
+
+    async fn wait_for_level(&mut self, level: PinState) {
         match &mut self._type {
-            Stm32GpioPinType::ExtiInput { pin, pull: _ } => pin.is_high(),
-            Stm32GpioPinType::Flex { pin, speed: _ } => pin.is_high(),
+            Stm32GpioPinType::ExtiInput { pin, pull: _ } => match level {
+                PinState::High => pin.wait_for_high().await,
+                PinState::Low => pin.wait_for_low().await,
+            },
+            Stm32GpioPinType::Flex { pin: _, speed: _ } => unreachable!(),
+        }
+    }
+}
+
+pub struct Stm32InterruptPin<'a> {
+    pin: Flex<'a>,
+    speed: Speed,
+}
+
+impl<'a> Stm32InterruptPin<'a> {
+    pub fn new(pin: Flex<'a>, speed: Speed) -> Self {
+        Self { pin, speed }
+    }
+}
+
+impl InterruptPin for Stm32InterruptPin<'_> {
+    fn configure(&mut self, mode: InterruptMode, level: PinState) {
+        self.pin.set_level(bool::from(level).into());
+        match mode {
+            InterruptMode::OpenDrain => {
+                self.pin.set_as_input_output(self.speed);
+            }
+            InterruptMode::ActiveDriver => {
+                self.pin.set_as_output(self.speed);
+            }
         }
     }
 }

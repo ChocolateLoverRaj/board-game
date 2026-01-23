@@ -6,6 +6,12 @@ pub struct ResetPin<T> {
     low_since: Option<Instant>,
 }
 
+impl<T> ResetPin<T> {
+    pub fn into_pin(self) -> T {
+        self.pin
+    }
+}
+
 impl<T: Wait> ResetPin<T> {
     pub fn new(pin: T) -> Self {
         Self {

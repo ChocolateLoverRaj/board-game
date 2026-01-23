@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+collect_array_ext_trait = "0.2.0"
 defmt = { version = "1.0.1", optional = true }
+embassy-futures = "0.1.2"
 embassy-time = "0.5.0"
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 strum = { version = "0.27.2", default-features = false, features = ["derive"] }
 
 [features]
-defmt = ["dep:defmt", "embassy-time/defmt"]
+defmt = ["dep:defmt", "embassy-time/defmt", "embassy-futures/defmt"]

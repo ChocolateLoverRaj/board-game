@@ -100,6 +100,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "collect_array_ext_trait"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ba2e83230de13abf9f0aab7b50d98ba07fb2135cb44c930de17b4bbdebaf497"
+
+[[package]]
 name = "cordyceps"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -248,7 +254,7 @@ name = "embassy-embedded-hal"
 version = "0.5.0"
 dependencies = [
  "defmt 1.0.1",
- "embassy-futures",
+ "embassy-futures 0.1.2",
  "embassy-hal-internal",
  "embassy-sync",
  "embassy-time",
@@ -292,6 +298,15 @@ name = "embassy-futures"
 version = "0.1.2"
 
 [[package]]
+name = "embassy-futures"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
+dependencies = [
+ "defmt 1.0.1",
+]
+
+[[package]]
 name = "embassy-hal-internal"
 version = "0.4.0"
 dependencies = [
@@ -323,7 +338,7 @@ dependencies = [
  "defmt 1.0.1",
  "document-features",
  "embassy-embedded-hal",
- "embassy-futures",
+ "embassy-futures 0.1.2",
  "embassy-hal-internal",
  "embassy-net-driver",
  "embassy-sync",
@@ -644,7 +659,9 @@ dependencies = [
 name = "mcp23017_emulator"
 version = "0.1.0"
 dependencies = [
+ "collect_array_ext_trait",
  "defmt 1.0.1",
+ "embassy-futures 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -660,7 +677,7 @@ dependencies = [
  "defmt 1.0.1",
  "defmt-rtt",
  "embassy-executor",
- "embassy-futures",
+ "embassy-futures 0.1.2",
  "embassy-stm32",
  "embassy-sync",
  "embedded-hal-async",

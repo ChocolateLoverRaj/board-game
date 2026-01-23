@@ -1,10 +1,16 @@
-use core::{iter::zip, mem, ops::Range};
+use core::{future::pending, iter::zip, mem, ops::Range};
 
+use collect_array_ext_trait::CollectArray;
+use embassy_futures::{
+    select::{select, select_array},
+    yield_now,
+};
 use embedded_hal::digital::PinState;
 use embedded_hal_async::digital::Wait;
-use strum::{AsRefStr, Display, EnumCount, FromRepr, VariantNames};
+use strum::{AsRefStr, Display, EnumCount, FromRepr, VariantArray, VariantNames};
 
 use crate::{
+    InterruptMode, InterruptPin,
     gpio_pin::{GpioPin, IoDirection},
     reset_pin::ResetPin,
 };
@@ -16,13 +22,17 @@ enum PinProperty {
     IoDirection,
     PullUpEnabled,
     IoLatch,
+    InterruptControl,
+    InputInverted,
+    InterruptEnabled,
+    CompareValue,
 }
 
 /// There are 8 GPIO pins for set A and set B
 const N_GPIO_PINS_PER_SET: usize = 8;
 const N_TOTAL_GPIO_PINS: usize = N_GPIO_PINS_PER_SET * AB::COUNT;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCount)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCount, VariantArray)]
 enum AB {
     A,
     B,
@@ -98,48 +108,119 @@ struct Register {
     _type: RegisterType,
     ab: AB,
 }
-pub struct Mcp23017<P, R> {
+
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptControl {
+    /// Compare with `DEFVAL` register
+    CompareWithConfiguredValue,
+    CompareWithPreviousValue,
+}
+
+impl From<bool> for InterruptControl {
+    fn from(value: bool) -> Self {
+        match value {
+            true => Self::CompareWithConfiguredValue,
+            false => Self::CompareWithPreviousValue,
+        }
+    }
+}
+
+impl From<InterruptControl> for bool {
+    fn from(value: InterruptControl) -> Self {
+        match value {
+            InterruptControl::CompareWithConfiguredValue => true,
+            InterruptControl::CompareWithPreviousValue => false,
+        }
+    }
+}
+
+pub struct Mcp23017<P, I, R> {
     gpio_pins: [P; N_TOTAL_GPIO_PINS],
+    interrupt_pins: [I; AB::COUNT],
     /// If you can, directly use your micro controller's RESET pin.
     /// We can also emulate a RESET pin.
     reset: ResetPin<R>,
+    // IOCON settings
+    /// IOCON.BANK
     bank_mode: bool,
+    /// IOCON.MIRROR
+    /// If set, an interrupt from any GPIO will trigger both interrupt pins
+    mirror_interrupts: bool,
+    /// IOCON.SEQOP
     sequential_mode: bool,
+    /// IOCON.ODR
+    int_mode: InterruptMode,
+    /// IOCON.INTPOL
+    int_active_state: PinState,
+
     selected_address: u8,
     /// Corresponds to the `IODIR` bit
     io_directions: [IoDirection; N_TOTAL_GPIO_PINS],
     pull_up_enabled: [bool; N_TOTAL_GPIO_PINS],
     output_latches: [PinState; N_TOTAL_GPIO_PINS],
+    gpio_inverted: [bool; N_TOTAL_GPIO_PINS],
+    int_enabled: [bool; N_TOTAL_GPIO_PINS],
+    int_compare: [PinState; N_TOTAL_GPIO_PINS],
+    interrupt_control: [InterruptControl; N_TOTAL_GPIO_PINS],
+    /// Can only be cleared by reading the GPIO or captured pin state
+    int_flags: [bool; N_TOTAL_GPIO_PINS],
+    interrupt_captured_values: [PinState; N_TOTAL_GPIO_PINS],
 }
 
-impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
+impl<P: GpioPin, I: InterruptPin, R: Wait> Mcp23017<P, I, R> {
     pub fn new(
         gpio_pins: [P; N_TOTAL_GPIO_PINS],
-        // int_a: Peri<'a, impl Pin>,
-        // int_b: Peri<'a, impl Pin>,
+        interrupt_pins: [I; AB::COUNT],
         reset_pin: R,
     ) -> Self {
         let mut s = Self {
             gpio_pins,
+            interrupt_pins,
             reset: ResetPin::new(reset_pin),
             bank_mode: false,
+            mirror_interrupts: false,
             sequential_mode: false,
+            int_mode: InterruptMode::ActiveDriver,
+            int_active_state: PinState::Low,
             selected_address: 0,
             io_directions: [IoDirection::Input; _],
             pull_up_enabled: [false; _],
             output_latches: [PinState::Low; _],
+            gpio_inverted: [false; _],
+            int_enabled: [false; _],
+            int_compare: [PinState::Low; _],
+            interrupt_control: [InterruptControl::CompareWithPreviousValue; _],
+            int_flags: [false; _],
+            interrupt_captured_values: [PinState::Low; _],
         };
-        s.reset();
+        s.update_all_pins();
+        s.update_interrupts();
         s
     }
 
     /// Init / reset everything to initial values
     pub fn reset(&mut self) {
         self.bank_mode = false;
+        self.mirror_interrupts = false;
+        self.sequential_mode = false;
+        self.int_mode = InterruptMode::ActiveDriver;
+        self.int_active_state = PinState::Low;
         self.selected_address = 0;
         self.io_directions = [IoDirection::Input; _];
         self.pull_up_enabled = [false; _];
         self.output_latches = [PinState::Low; _];
+        self.gpio_inverted = [false; _];
+        self.int_enabled = [false; _];
+        self.int_compare = [PinState::Low; _];
+        self.interrupt_control = [InterruptControl::CompareWithPreviousValue; _];
+        self.int_flags = [false; _];
+        self.interrupt_captured_values = [PinState::Low; _];
+        self.update_all_pins();
+        self.update_interrupts();
+    }
+
+    fn update_all_pins(&mut self) {
         for i in 0..N_TOTAL_GPIO_PINS {
             self.update_pin(i);
         }
@@ -209,6 +290,32 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
         );
     }
 
+    fn update_interrupts(&mut self) {
+        let mut enable_interrupts = [false; AB::COUNT];
+        for (i, set) in AB::VARIANTS.iter().enumerate() {
+            if self.int_flags[set.range()].contains(&true) {
+                enable_interrupts[i] = true;
+            }
+        }
+        if self.mirror_interrupts && enable_interrupts.contains(&true) {
+            enable_interrupts.fill(true);
+        }
+        for (i, interrupt_pin) in self.interrupt_pins.iter_mut().enumerate() {
+            if enable_interrupts[i] {
+                #[cfg(feature = "defmt")]
+                defmt::trace!("enabling interrupt pin {}", i);
+            }
+            interrupt_pin.configure(
+                self.int_mode,
+                if enable_interrupts[i] {
+                    self.int_active_state
+                } else {
+                    !self.int_active_state
+                },
+            );
+        }
+    }
+
     /// Writes the register based on the saved address
     /// and updates the address pointer
     fn write_register(&mut self, register: Register, value: u8) {
@@ -240,7 +347,7 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
                         let property = PinProperty::IoDirection.as_ref();
                         #[cfg(feature = "defmt")]
                         defmt::info!(
-                            "{}.{:015} = {}",
+                            "{}.{:017} = {}",
                             FormatPinIndex(index),
                             property,
                             new_io_direction
@@ -274,7 +381,7 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
                         let property = PinProperty::PullUpEnabled.as_ref();
                         #[cfg(feature = "defmt")]
                         defmt::info!(
-                            "{}.{:015} = {}",
+                            "{}.{:017} = {}",
                             FormatPinIndex(index),
                             property,
                             new_pull_up_enabled
@@ -308,13 +415,138 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
                         let property = PinProperty::IoLatch.as_ref();
                         #[cfg(feature = "defmt")]
                         defmt::info!(
-                            "{}.{:015} = {}",
+                            "{}.{:017} = {}",
                             FormatPinIndex(index),
                             property,
                             defmt::Debug2Format(&pin_state)
                         );
                         self.update_pin(index);
                     });
+            }
+            RegisterType::IPOL => {
+                let new_gpio_inverted = {
+                    let mut new_gpio_inverted = self.gpio_inverted;
+                    for (index, gpio_inverted) in new_gpio_inverted[register.ab.range()]
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        *gpio_inverted = (value & (1 << index)) != 0;
+                    }
+                    new_gpio_inverted
+                };
+                let previous_gpio_inverted =
+                    mem::replace(&mut self.gpio_inverted, new_gpio_inverted);
+                zip(previous_gpio_inverted, self.gpio_inverted)
+                    .enumerate()
+                    .filter_map(|(index, (previous_value, current_value))| {
+                        if current_value != previous_value {
+                            Some((index, current_value))
+                        } else {
+                            None
+                        }
+                    })
+                    .for_each(|(index, new_value)| {
+                        let property = PinProperty::InputInverted.as_ref();
+                        #[cfg(feature = "defmt")]
+                        defmt::info!("{}.{:017} = {}", FormatPinIndex(index), property, new_value);
+                    });
+            }
+            RegisterType::GPINTEN => {
+                let new_int_enabled = {
+                    let mut new_int_enabled = self.int_enabled;
+                    for (index, int_enabled) in
+                        new_int_enabled[register.ab.range()].iter_mut().enumerate()
+                    {
+                        *int_enabled = (value & (1 << index)) != 0;
+                    }
+                    new_int_enabled
+                };
+                let previous_int_enabled = mem::replace(&mut self.int_enabled, new_int_enabled);
+                zip(previous_int_enabled, self.int_enabled)
+                    .enumerate()
+                    .filter_map(|(index, (previous_value, current_value))| {
+                        if current_value != previous_value {
+                            Some((index, current_value))
+                        } else {
+                            None
+                        }
+                    })
+                    .for_each(|(index, new_value)| {
+                        let property = PinProperty::InterruptEnabled.as_ref();
+                        #[cfg(feature = "defmt")]
+                        defmt::info!("{}.{:017} = {}", FormatPinIndex(index), property, new_value);
+                        self.update_pin(index);
+                    });
+            }
+            RegisterType::DEFVAL => {
+                let new_compare_register = {
+                    let mut new_compare_register = self.int_compare;
+                    for (index, compare_value) in new_compare_register[register.ab.range()]
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        *compare_value = ((value & (1 << index)) != 0).into();
+                    }
+                    new_compare_register
+                };
+                let previous_compare_register =
+                    mem::replace(&mut self.int_compare, new_compare_register);
+                zip(previous_compare_register, self.int_compare)
+                    .enumerate()
+                    .filter_map(|(index, (previous_value, current_value))| {
+                        if current_value != previous_value {
+                            Some((index, current_value))
+                        } else {
+                            None
+                        }
+                    })
+                    .for_each(|(index, pin_state)| {
+                        let property = PinProperty::CompareValue.as_ref();
+                        #[cfg(feature = "defmt")]
+                        defmt::info!(
+                            "{}.{:017} = {}",
+                            FormatPinIndex(index),
+                            property,
+                            defmt::Debug2Format(&pin_state)
+                        );
+                    });
+            }
+            RegisterType::INTCON => {
+                let new_interrupt_control = {
+                    let mut new_interrupt_control = self.interrupt_control;
+                    for (index, interrupt_control) in new_interrupt_control[register.ab.range()]
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        *interrupt_control = ((value & (1 << index)) != 0).into();
+                    }
+                    new_interrupt_control
+                };
+                let previous_interrupt_control =
+                    mem::replace(&mut self.interrupt_control, new_interrupt_control);
+                zip(previous_interrupt_control, self.interrupt_control)
+                    .enumerate()
+                    .filter_map(|(index, (previous_value, current_value))| {
+                        if current_value != previous_value {
+                            Some((index, current_value))
+                        } else {
+                            None
+                        }
+                    })
+                    .for_each(|(index, new_value)| {
+                        let property = PinProperty::InterruptControl.as_ref();
+                        #[cfg(feature = "defmt")]
+                        defmt::info!("{}.{:017} = {}", FormatPinIndex(index), property, new_value);
+                    });
+            }
+            RegisterType::IOCON => {
+                self.bank_mode = (value & 1 << 7) != 0;
+                self.mirror_interrupts = (value & 1 << 6) != 0;
+                self.sequential_mode = (value & 1 << 5) != 0;
+                // what is slew rate idk
+                self.int_mode = ((value & 1 << 2) != 0).into();
+                self.int_active_state = ((value & 1 << 1) != 0).into();
+                self.update_interrupts();
             }
             register_type => todo!("write {register_type:?}"),
         }
@@ -352,13 +584,20 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
                     .into_iter()
                     .enumerate()
                 {
-                    value |= u8::from(match self.io_directions[i + register.ab.starting_index()] {
-                        IoDirection::Output => {
-                            self.output_latches[i + register.ab.starting_index()].into()
-                        }
-                        IoDirection::Input => pin.is_high(),
-                    }) << i;
+                    value |= u8::from(bool::from(
+                        match self.io_directions[i + register.ab.starting_index()] {
+                            IoDirection::Output => {
+                                self.output_latches[i + register.ab.starting_index()].into()
+                            }
+                            IoDirection::Input => pin.level(),
+                        },
+                    )) << i;
                 }
+                // The interrupt is cleared
+                self.int_flags[register.ab.range()].fill(false);
+                #[cfg(feature = "defmt")]
+                defmt::warn!("cleared interrupts for {}", register.ab);
+                self.update_interrupts();
                 value
             }
             register_type => todo!("read {register_type:?}"),
@@ -372,10 +611,71 @@ impl<P: GpioPin, R: Wait> Mcp23017<P, R> {
     /// Also handles the reset pin
     pub async fn run(&mut self) {
         loop {
-            self.reset.wait_until_reset().await;
-            #[cfg(feature = "defmt")]
-            defmt::info!("Received reset input. Resetting emulated MCP23017.");
-            self.reset();
+            use embassy_futures::select::Either::*;
+            match select(
+                self.reset.wait_until_reset(),
+                select_array({
+                    self.gpio_pins
+                        .iter_mut()
+                        .enumerate()
+                        .map(async |(i, pin)| {
+                            // Only send interrupts for pins that don't already have the interrupt flag on
+                            if self.int_enabled[i] && !self.int_flags[i] {
+                                let compare_value = match self.interrupt_control[i] {
+                                    InterruptControl::CompareWithConfiguredValue => {
+                                        self.int_compare[i]
+                                    }
+                                    InterruptControl::CompareWithPreviousValue => {
+                                        todo!("what is the previous value to compare with?")
+                                    }
+                                };
+                                if pin.can_wait() {
+                                    let level = !compare_value;
+                                    #[cfg(feature = "defmt")]
+                                    defmt::warn!(
+                                        "pin {} waiting for level to be {}",
+                                        i,
+                                        defmt::Debug2Format(&level)
+                                    );
+                                    pin.wait_for_level(level).await;
+                                } else {
+                                    #[cfg(feature = "defmt")]
+                                    defmt::warn!("pin {} can't wait. falling back to polling", i);
+                                    loop {
+                                        if pin.level() != compare_value {
+                                            break;
+                                        }
+                                        yield_now().await;
+                                    }
+                                }
+                                !compare_value
+                            } else {
+                                pending().await
+                            }
+                        })
+                        .collect_array::<N_TOTAL_GPIO_PINS>()
+                        .unwrap()
+                }),
+            )
+            .await
+            {
+                First(()) => {
+                    #[cfg(feature = "defmt")]
+                    defmt::info!("Received reset input. Resetting emulated MCP23017.");
+                    self.reset();
+                }
+                Second((level, index)) => {
+                    #[cfg(feature = "defmt")]
+                    defmt::info!(
+                        "interrupt cuz pin {} changed to {}",
+                        index,
+                        defmt::Debug2Format(&level)
+                    );
+                    self.int_flags[index] = true;
+                    self.interrupt_captured_values[index] = level;
+                    self.update_interrupts();
+                }
+            };
         }
     }
 }

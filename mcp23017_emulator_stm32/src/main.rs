@@ -2,7 +2,7 @@
 #![no_main]
 mod stm32_gpio_pin;
 
-use defmt::{debug, error, info, trace, warn};
+use defmt::{error, trace, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_stm32::{
@@ -16,7 +16,7 @@ use embassy_stm32::{
 };
 use mcp23017_emulator::Mcp23017;
 
-use crate::stm32_gpio_pin::Stm32GpioPin;
+use crate::stm32_gpio_pin::{Stm32GpioPin, Stm32InterruptPin};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -42,11 +42,9 @@ async fn main(_spawner: Spawner) {
         base_address | least_significant_bits
     }));
 
-    // ExtiInput::new(p.PA6, p.EXTI6, Pull::Down, Irqs);
-    // ExtiInput::new(p.PA7, p.EXTI7, Pull::Down, Irqs);
-
     let mut mcp23017 = Mcp23017::new(
         [
+            // A
             Stm32GpioPin::new_flex(Flex::new(p.PB0), Speed::Low),
             Stm32GpioPin::new_flex(Flex::new(p.PA1), Speed::Low),
             Stm32GpioPin::new_flex(Flex::new(p.PA2), Speed::Low),
@@ -55,14 +53,19 @@ async fn main(_spawner: Spawner) {
             Stm32GpioPin::new_flex(Flex::new(p.PA5), Speed::Low),
             Stm32GpioPin::new_flex(Flex::new(p.PA6), Speed::Low),
             Stm32GpioPin::new_flex(Flex::new(p.PB1), Speed::Low),
+            // B
             Stm32GpioPin::new_flex(Flex::new(p.PA7), Speed::Low),
-            Stm32GpioPin::new_flex(Flex::new(p.PA8), Speed::Low),
-            Stm32GpioPin::new_flex(Flex::new(p.PA9), Speed::Low),
-            Stm32GpioPin::new_flex(Flex::new(p.PA10), Speed::Low),
+            Stm32GpioPin::new_exti(p.PA8, p.EXTI8, Pull::Up, Irqs),
+            Stm32GpioPin::new_exti(p.PA9, p.EXTI9, Pull::Up, Irqs),
+            Stm32GpioPin::new_exti(p.PA10, p.EXTI10, Pull::Up, Irqs),
             Stm32GpioPin::new_flex(Flex::new(p.PB11), Speed::Low),
             Stm32GpioPin::new_flex(Flex::new(p.PB12), Speed::Low),
             Stm32GpioPin::new_flex(Flex::new(p.PB13), Speed::Low),
             Stm32GpioPin::new_flex(Flex::new(p.PB14), Speed::Low),
+        ],
+        [
+            Stm32InterruptPin::new(Flex::new(p.PB5), Speed::Low),
+            Stm32InterruptPin::new(Flex::new(p.PB8), Speed::Low),
         ],
         ExtiInput::new(p.PB15, p.EXTI15, Pull::Up, Irqs),
     );
