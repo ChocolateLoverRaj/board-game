@@ -1,7 +1,5 @@
 #![no_std]
 #![no_main]
-mod stm32_gpio_pin;
-
 use defmt::{error, trace, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
@@ -14,9 +12,10 @@ use embassy_stm32::{
     peripherals::{self},
     time::khz,
 };
-use mcp23017_emulator::Mcp23017;
-
-use crate::stm32_gpio_pin::{Stm32GpioPin, Stm32InterruptPin};
+use mcp23017_peripheral::{
+    Mcp23017,
+    stm32::{Stm32GpioPin, Stm32InterruptPin},
+};
 
 use {defmt_rtt as _, panic_probe as _};
 

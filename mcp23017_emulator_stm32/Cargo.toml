@@ -36,8 +36,9 @@ strum = { version = "0.27.2", default-features = false, features = ["derive"] }
 strum_macros = "0.27.2"
 rm = "0.3.2"
 embedded-hal-async = "1.0.0"
-mcp23017_emulator = { version = "0.1.0", path = "../mcp23017_emulator", features = [
+mcp23017_peripheral = { version = "0.1.0", path = "../../mcp23017/peripheral", features = [
     "defmt",
+    "stm32f103c8",
 ] }
 
 [profile.dev]
@@ -55,3 +56,4 @@ bench = false
 [patch.crates-io]
 embassy-time = { path = "../../embassy/embassy-time" }
 embassy-time-driver = { path = "../../embassy/embassy-time-driver" }
+embassy-stm32 = { path = "../../embassy/embassy-stm32" }

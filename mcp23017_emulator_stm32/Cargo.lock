@@ -656,15 +656,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcp23017_emulator"
+name = "mcp23017_common"
 version = "0.1.0"
 dependencies = [
- "collect_array_ext_trait",
  "defmt 1.0.1",
- "embassy-futures 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "embassy-time",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
  "strum",
 ]
 
@@ -682,13 +677,28 @@ dependencies = [
  "embassy-sync",
  "embedded-hal-async",
  "heapless 0.8.0",
- "mcp23017_emulator",
+ "mcp23017_peripheral",
  "nb 1.1.0",
  "panic-probe",
  "rm",
  "static_cell",
  "strum",
  "strum_macros",
+]
+
+[[package]]
+name = "mcp23017_peripheral"
+version = "0.1.0"
+dependencies = [
+ "collect_array_ext_trait",
+ "defmt 1.0.1",
+ "embassy-futures 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-stm32",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "mcp23017_common",
+ "strum",
 ]
 
 [[package]]
