@@ -6,9 +6,7 @@ use trouble_host::{
     prelude::{AdStructure, EventHandler},
 };
 
-use crate::{SERVICE_UUID, liberal_renderer::SCANNING_BUFFER_LEN};
-
-pub const SCAN_CHANNEL_SIZE: usize = SCANNING_BUFFER_LEN;
+use crate::SERVICE_UUID;
 
 pub type ScanChannel = Channel<CriticalSectionRawMutex, Address, 1>;
 

@@ -17,7 +17,7 @@ pub struct ConnectionStatus {
     pub state: ConnectState,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ConnectionAction {
     Scan {
         peripherals: heapless::Vec<BdAddr, SCAN_LIST_SIZE>,
@@ -39,7 +39,7 @@ pub enum ScanningSelectedItem {
     Title,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BluetoothScreen {
     Scanning {
         scroll_y: u32,
@@ -60,20 +60,20 @@ pub enum MainMenuSelectedItem {
     Bluetooth,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MainMenuScreen {
     pub scroll_y: u32,
     /// See [`MainMenuSelectedItem`]
     pub selected_item: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Screen {
     MainMenu(MainMenuScreen),
     Bluetooth(BluetoothScreen),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GameStateSettingUp {
     pub connection_action: ConnectionAction,
     pub screen: Screen,
@@ -134,7 +134,7 @@ impl FascistAction {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GameStatePlaying {
     /// The game has 5-10 players. Once the game is started, the number of players currently cannot be adjusted.
     /// However, we could in the future handle changing the number of players mid-game.
@@ -181,7 +181,7 @@ impl GameStatePlaying {
     // pub fn
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum GameState {
     SettingUp(GameStateSettingUp),
     Playing(GameStatePlaying),
@@ -331,12 +331,14 @@ impl GameState {
         match self {
             Self::SettingUp(state) => match &mut state.connection_action {
                 ConnectionAction::Scan { peripherals } => {
-                    if let Err(address) = peripherals.push(address) {
-                        #[cfg(feature = "defmt")]
-                        defmt::warn!(
-                            "Failed to push address {} to list of scanned peripherals because the list is full. Consider rebuilding with a larger max size.",
-                            address
-                        );
+                    if !peripherals.contains(&address) {
+                        if let Err(address) = peripherals.push(address) {
+                            #[cfg(feature = "defmt")]
+                            defmt::warn!(
+                                "Failed to push address {} to list of scanned peripherals because the list is full. Consider rebuilding with a larger max size.",
+                                address
+                            );
+                        }
                     }
                 }
                 ConnectionAction::Connect(_) => {

@@ -192,11 +192,11 @@ async fn main(spawner: Spawner) {
                 .await
                 .unwrap()
                 .unwrap_or_default();
-            for saved_bond_information in stored_data.saved_bonds.iter().cloned() {
-                stack
-                    .add_bond_information(saved_bond_information.into())
-                    .unwrap();
-            }
+            // for saved_bond_information in stored_data.saved_bonds.iter().cloned() {
+            //     stack
+            //         .add_bond_information(saved_bond_information.into())
+            //         .unwrap();
+            // }
 
             let Host {
                 mut peripheral,
@@ -271,7 +271,12 @@ async fn main(spawner: Spawner) {
                     }
                     info!("L2CAP data echoed");
 
-                    Timer::after(Duration::from_secs(2)).await;
+                    loop {
+                        if let ConnectionEvent::Disconnected { reason } = conn.next().await {
+                            info!("Disconnected. reason: {}", reason);
+                            break;
+                        }
+                    }
                 }
             })
             .await;
