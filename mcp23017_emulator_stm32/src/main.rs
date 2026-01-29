@@ -84,7 +84,7 @@ async fn main(_spawner: Spawner) {
         };
         match command.kind {
             SlaveCommandKind::Read => {
-                let mut buffer = [Default::default(); 1];
+                let mut buffer = [Default::default(); 2];
                 mcp23017.prepare_read_buffer(&mut buffer);
                 let use_sync_respond_to_read = true;
                 let result = if use_sync_respond_to_read {
@@ -108,7 +108,7 @@ async fn main(_spawner: Spawner) {
                 mcp23017.confirm_bytes_read(bytes_transmitted);
             }
             SlaveCommandKind::Write => {
-                let mut buffer = [Default::default(); 2];
+                let mut buffer = [Default::default(); 3];
                 let use_sync_respond_to_write = true;
                 let result = if use_sync_respond_to_write {
                     i2c.blocking_respond_to_write(&mut buffer)

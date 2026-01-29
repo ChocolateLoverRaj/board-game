@@ -1,33 +1,27 @@
-use defmt::info;
+use core::any::Any;
+
 use embassy_futures::select::{select, select4};
 use embassy_time::{Duration, Instant};
 use embedded_hal::digital::PinState;
-use embedded_hal_async::digital::Wait;
-use mcp23017_controller::{Input, Mcp23017};
+use mcp23017_controller::{Pin, mode::Watch};
 
 use crate::{Debouncer, Direction, RotaryEncoder, RotaryPinsState};
 
-pub struct RotaryInput<'a, ResetPin, I2c, InterruptPin> {
-    dt: Input<'a, ResetPin, I2c, InterruptPin>,
+pub struct RotaryInput<'a> {
+    dt: Pin<'a, Watch>,
     dt_debounce: Debouncer<PinState>,
-    clk: Input<'a, ResetPin, I2c, InterruptPin>,
+    clk: Pin<'a, Watch>,
     clk_debounce: Debouncer<PinState>,
     rotary_encoder: RotaryEncoder,
 }
 
-impl<'a, ResetPin, I2c: embedded_hal_async::i2c::I2c, InterruptPin: Wait>
-    RotaryInput<'a, ResetPin, I2c, InterruptPin>
-{
-    pub async fn new(
-        mcp23017: &'a Mcp23017<ResetPin, I2c, InterruptPin>,
-        dt_gpio: usize,
-        clk_gpio: usize,
-    ) -> Self {
+impl<'a> RotaryInput<'a> {
+    pub async fn new(dt: Pin<'a, impl Any>, clk: Pin<'a, impl Any>) -> Self {
         let debounce_time = Duration::from_millis(1);
-        let dt = mcp23017.input(dt_gpio, true).await.unwrap();
-        let dt_debounce = Debouncer::new(dt.last_known_state(), debounce_time);
-        let clk = mcp23017.input(clk_gpio, true).await.unwrap();
-        let clk_debounce = Debouncer::new(clk.last_known_state(), debounce_time);
+        let mut dt = dt.into_watch(true).await;
+        let dt_debounce = Debouncer::new(dt.state().await, debounce_time);
+        let mut clk = clk.into_watch(true).await;
+        let clk_debounce = Debouncer::new(clk.state().await, debounce_time);
         let rotary_encoder = RotaryEncoder::new(RotaryPinsState {
             dt: dt_debounce.value() == PinState::Low,
             clk: clk_debounce.value() == PinState::Low,
@@ -44,16 +38,16 @@ impl<'a, ResetPin, I2c: embedded_hal_async::i2c::I2c, InterruptPin: Wait>
     pub async fn next(&mut self) -> Direction {
         loop {
             select4(
-                self.dt.wait_for_change(),
+                self.dt.watch(),
                 self.dt_debounce.wait(),
-                self.clk.wait_for_change(),
+                self.clk.watch(),
                 self.clk_debounce.wait(),
             )
             .await;
             self.dt_debounce
-                .process_data(self.dt.last_known_state(), Instant::now());
+                .process_data(self.dt.state().await, Instant::now());
             self.clk_debounce
-                .process_data(self.clk.last_known_state(), Instant::now());
+                .process_data(self.clk.state().await, Instant::now());
             if let Some(direction) = self.rotary_encoder.process_data(RotaryPinsState {
                 dt: self.dt_debounce.value() == PinState::Low,
                 clk: self.clk_debounce.value() == PinState::Low,
@@ -64,26 +58,24 @@ impl<'a, ResetPin, I2c: embedded_hal_async::i2c::I2c, InterruptPin: Wait>
     }
 }
 
-pub struct RotaryButton<'a, ResetPin, I2c, InterruptPin> {
-    switch: Input<'a, ResetPin, I2c, InterruptPin>,
+pub struct RotaryButton<'a> {
+    switch: Pin<'a, Watch>,
     debouncer: Debouncer<PinState>,
 }
 
-impl<'a, ResetPin, I2c: embedded_hal_async::i2c::I2c, InterruptPin: Wait>
-    RotaryButton<'a, ResetPin, I2c, InterruptPin>
-{
-    pub async fn new(mcp23017: &'a Mcp23017<ResetPin, I2c, InterruptPin>, sw_gpio: usize) -> Self {
-        let switch = mcp23017.input(sw_gpio, true).await.unwrap();
-        let debouncer = Debouncer::new(switch.last_known_state(), Duration::from_millis(1));
+impl<'a> RotaryButton<'a> {
+    pub async fn new(switch: Pin<'a, impl Any>) -> Self {
+        let mut switch = switch.into_watch(true).await;
+        let debouncer = Debouncer::new(switch.state().await, Duration::from_millis(1));
         Self { switch, debouncer }
     }
 
     pub async fn wait_until_press(&mut self) {
         loop {
-            select(self.switch.wait_for_change(), self.debouncer.wait()).await;
+            select(self.switch.watch(), self.debouncer.wait()).await;
             let level_changed = self
                 .debouncer
-                .process_data(self.switch.last_known_state(), Instant::now());
+                .process_data(self.switch.state().await, Instant::now());
             if level_changed && self.debouncer.value() == PinState::Low {
                 break;
             }

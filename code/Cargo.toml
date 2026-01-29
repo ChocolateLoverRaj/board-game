@@ -80,3 +80,9 @@ esp32c3 = [
     "esp-alloc/esp32c3",
     "esp-storage/esp32c3",
 ]
+
+[patch.crates-io]
+embedded-hal = { git = "https://github.com/rust-embedded/embedded-hal" }
+embedded-hal-async = { git = "https://github.com/rust-embedded/embedded-hal" }
+embassy-embedded-hal = { git = "https://github.com/ChocolateLoverRaj/embassy", branch = "digital-adapter-contribute" }
+embassy-sync = { git = "https://github.com/ChocolateLoverRaj/embassy", branch = "digital-adapter-contribute" }

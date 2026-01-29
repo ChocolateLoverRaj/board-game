@@ -1,7 +1,23 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+pub mod ui;
+
+use core::fmt::Display;
+
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 use heapless::index_set::FnvIndexSet;
 use strum::VariantArray;
-use trouble_host::prelude::BdAddr;
+use trouble_host::{
+    Address,
+    prelude::{AddrKind, BdAddr},
+};
+
+use crate::ui::{Screen, SelectedItem};
+
+extern crate alloc;
 
 pub const SCAN_LIST_SIZE: usize = 4;
 
@@ -68,7 +84,7 @@ pub struct MainMenuScreen {
 }
 
 #[derive(Debug, Clone)]
-pub enum Screen {
+pub enum GameScreen {
     MainMenu(MainMenuScreen),
     Bluetooth(BluetoothScreen),
 }
@@ -76,7 +92,7 @@ pub enum Screen {
 #[derive(Debug, Clone)]
 pub struct GameStateSettingUp {
     pub connection_action: ConnectionAction,
-    pub screen: Screen,
+    pub screen: GameScreen,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -200,7 +216,7 @@ impl GameState {
                     peripherals: Default::default(),
                 },
             },
-            screen: Screen::MainMenu(MainMenuScreen {
+            screen: GameScreen::MainMenu(MainMenuScreen {
                 scroll_y: 0,
                 selected_item: 0,
             }),
@@ -352,7 +368,7 @@ impl GameState {
     pub fn process_input(&mut self, input: Input) {
         match self {
             Self::SettingUp(state) => match &mut state.screen {
-                Screen::MainMenu(screen) => match input {
+                GameScreen::MainMenu(screen) => match input {
                     Input::Click => match MainMenuSelectedItem::VARIANTS[screen.selected_item] {
                         MainMenuSelectedItem::StartGame => match &state.connection_action {
                             ConnectionAction::Connect(connection_status) => {
@@ -367,14 +383,14 @@ impl GameState {
                                 });
                             }
                             ConnectionAction::Scan { peripherals: _ } => {
-                                state.screen = Screen::Bluetooth(BluetoothScreen::Scanning {
+                                state.screen = GameScreen::Bluetooth(BluetoothScreen::Scanning {
                                     scroll_y: 0, // TODO: make sure it's visible
                                     selected_item: ScanningSelectedItem::Title as usize,
                                 });
                             }
                         },
                         MainMenuSelectedItem::Bluetooth => {
-                            state.screen = Screen::Bluetooth(BluetoothScreen::Scanning {
+                            state.screen = GameScreen::Bluetooth(BluetoothScreen::Scanning {
                                 scroll_y: 0, // TODO: make sure it's visible
                                 selected_item: ScanningSelectedItem::Title as usize,
                             });
@@ -392,7 +408,7 @@ impl GameState {
                         // TODO: Adjust scroll
                     }
                 },
-                Screen::Bluetooth(BluetoothScreen::Scanning {
+                GameScreen::Bluetooth(BluetoothScreen::Scanning {
                     scroll_y,
                     selected_item,
                 }) => {
@@ -405,7 +421,7 @@ impl GameState {
                             if *selected_item < ScanningSelectedItem::VARIANTS.len() {
                                 match ScanningSelectedItem::VARIANTS[*selected_item] {
                                     ScanningSelectedItem::Back => {
-                                        state.screen = Screen::MainMenu(MainMenuScreen {
+                                        state.screen = GameScreen::MainMenu(MainMenuScreen {
                                             scroll_y: {
                                                 // TODO: Make sure it's visible
                                                 0
@@ -423,7 +439,7 @@ impl GameState {
                                         state: ConnectState::Connecting,
                                     });
                                 state.screen =
-                                    Screen::Bluetooth(BluetoothScreen::ConnectingConnected {
+                                    GameScreen::Bluetooth(BluetoothScreen::ConnectingConnected {
                                         scroll_y: 0, // TODO: make sure it's visible
                                         selected_item: ConnectingConnectedSelectedItem::Title
                                             as usize,
@@ -442,7 +458,7 @@ impl GameState {
                         }
                     }
                 }
-                Screen::Bluetooth(BluetoothScreen::ConnectingConnected {
+                GameScreen::Bluetooth(BluetoothScreen::ConnectingConnected {
                     scroll_y,
                     selected_item,
                 }) => {
@@ -450,7 +466,7 @@ impl GameState {
                         Input::Click => {
                             match ConnectingConnectedSelectedItem::VARIANTS[*selected_item] {
                                 ConnectingConnectedSelectedItem::Back => {
-                                    state.screen = Screen::MainMenu(MainMenuScreen {
+                                    state.screen = GameScreen::MainMenu(MainMenuScreen {
                                         scroll_y: {
                                             // TODO: Make sure it's visible
                                             0
@@ -463,10 +479,11 @@ impl GameState {
                                     state.connection_action = ConnectionAction::Scan {
                                         peripherals: Default::default(),
                                     };
-                                    state.screen = Screen::Bluetooth(BluetoothScreen::Scanning {
-                                        scroll_y: 0,
-                                        selected_item: 0,
-                                    });
+                                    state.screen =
+                                        GameScreen::Bluetooth(BluetoothScreen::Scanning {
+                                            scroll_y: 0,
+                                            selected_item: 0,
+                                        });
                                 }
                             }
                         }
@@ -513,6 +530,58 @@ impl GameState {
                 fascist_policy_leds: state.fascist_policies_placed,
                 election_tracker_leds: state.election_fail_streak,
             },
+        }
+    }
+
+    pub fn screen(&self) -> Option<Screen<String, Vec<String>>> {
+        match self {
+            Self::SettingUp(state) => match state.screen {
+                GameScreen::MainMenu(MainMenuScreen {
+                    scroll_y,
+                    selected_item,
+                }) => {
+                    Some(Screen {
+                        title: "Setup".into(),
+                        can_go_back: false,
+                        items: MainMenuSelectedItem::VARIANTS
+                            .iter()
+                            .map(|item| {
+                                match item {
+                                    MainMenuSelectedItem::StartGame => "Start Game",
+                                    MainMenuSelectedItem::Bluetooth => "Bluetooth",
+                                }
+                                .into()
+                            })
+                            .collect(),
+                        selected_item: SelectedItem::Item(0),
+                    })
+                    // None
+                }
+                GameScreen::Bluetooth(BluetoothScreen::Scanning {
+                    scroll_y,
+                    selected_item,
+                }) => Some(Screen {
+                    title: "Bluetooth".into(),
+                    can_go_back: true,
+                    items: match &state.connection_action {
+                        ConnectionAction::Scan { peripherals } => peripherals,
+                        _ => unreachable!(),
+                    }
+                    .iter()
+                    .copied()
+                    .map(|addr| {
+                        Address {
+                            addr,
+                            kind: AddrKind::RANDOM,
+                        }
+                        .to_string()
+                    })
+                    .collect(),
+                    selected_item: SelectedItem::Item(0),
+                }),
+                _ => None,
+            },
+            _ => None,
         }
     }
 

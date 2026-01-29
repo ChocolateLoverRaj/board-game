@@ -455,14 +455,12 @@ dependencies = [
 [[package]]
 name = "embedded-hal"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+source = "git+https://github.com/rust-embedded/embedded-hal#b8fd20d94671f8165a7129649867199197efd058"
 
 [[package]]
 name = "embedded-hal-async"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c4c685bbef7fe13c3c6dd4da26841ed3980ef33e841cddfa15ce8a8fb3f1884"
+source = "git+https://github.com/rust-embedded/embedded-hal#b8fd20d94671f8165a7129649867199197efd058"
 dependencies = [
  "embedded-hal 1.0.0",
 ]
@@ -945,7 +943,7 @@ dependencies = [
 [[package]]
 name = "stm32-metapac"
 version = "19.0.0"
-source = "git+https://github.com/embassy-rs/stm32-data-generated?tag=stm32-data-b77e90cbd1c55b5ebb87c3bd46e6681915862812#562ffb5746da468e22df8e320639fb7f0bce3786"
+source = "git+https://github.com/embassy-rs/stm32-data-generated?tag=stm32-data-7939779bbf5bf689c5f5e3d46ea6442eec5a8cf6#02e8216f2aaba91cde03ec2920ad20d4083c6462"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",

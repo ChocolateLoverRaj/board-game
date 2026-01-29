@@ -14,8 +14,8 @@ use embedded_graphics::{
 use embedded_hal_async::i2c::I2c;
 use esp_hal::{gpio::Flex, i2c, time::Rate};
 use game_pure::{
-    BluetoothScreen, ConnectState, ConnectionAction, GameState, MainMenuScreen,
-    MainMenuSelectedItem, ScanningSelectedItem, Screen,
+    BluetoothScreen, ConnectState, ConnectionAction, GameScreen, GameState, MainMenuScreen,
+    MainMenuSelectedItem, ScanningSelectedItem,
 };
 use ssd1306::{
     I2CDisplayInterface, Ssd1306Async, mode::DisplayConfigAsync, prelude::*,
@@ -43,7 +43,7 @@ async fn render_ui_2<I: I2c>(display: &mut D<'_, I>, game_state: GameState) {
     display.clear(BinaryColor::Off).unwrap();
     match game_state {
         GameState::SettingUp(state) => match state.screen {
-            Screen::MainMenu(MainMenuScreen {
+            GameScreen::MainMenu(MainMenuScreen {
                 scroll_y,
                 selected_item,
             }) => {
@@ -81,7 +81,7 @@ async fn render_ui_2<I: I2c>(display: &mut D<'_, I>, game_state: GameState) {
                 .draw(display, display.bounding_box())
                 .unwrap();
             }
-            Screen::Bluetooth(BluetoothScreen::Scanning {
+            GameScreen::Bluetooth(BluetoothScreen::Scanning {
                 scroll_y,
                 selected_item,
             }) => {
@@ -155,7 +155,7 @@ async fn render_ui_2<I: I2c>(display: &mut D<'_, I>, game_state: GameState) {
                 .draw(display, display.bounding_box())
                 .unwrap();
             }
-            Screen::Bluetooth(BluetoothScreen::ConnectingConnected {
+            GameScreen::Bluetooth(BluetoothScreen::ConnectingConnected {
                 scroll_y,
                 selected_item,
             }) => {

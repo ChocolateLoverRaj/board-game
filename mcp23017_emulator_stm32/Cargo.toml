@@ -57,3 +57,5 @@ bench = false
 embassy-time = { path = "../../embassy/embassy-time" }
 embassy-time-driver = { path = "../../embassy/embassy-time-driver" }
 embassy-stm32 = { path = "../../embassy/embassy-stm32" }
+embedded-hal = { git = "https://github.com/rust-embedded/embedded-hal" }
+embedded-hal-async = { git = "https://github.com/rust-embedded/embedded-hal" }
