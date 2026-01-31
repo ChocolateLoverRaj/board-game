@@ -18,6 +18,14 @@ test = false
 doctest = false
 bench = false
 
+[[bin]]
+name = "dev"
+path = "src/dev.rs"
+test = false
+doctest = false
+bench = false
+
+
 [lib]
 name = "lib"
 path = "src/lib/mod.rs"

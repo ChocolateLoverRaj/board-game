@@ -1,5 +1,4 @@
 #![no_std]
-pub mod ble;
 pub mod ble_2;
 pub mod config;
 mod debouncer;
