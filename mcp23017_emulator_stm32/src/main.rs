@@ -4,12 +4,12 @@ use defmt::{error, trace, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_stm32::{
-    bind_interrupts,
+    bind_interrupts, dma,
     exti::{self, ExtiInput},
     gpio::{Flex, Pull, Speed},
     i2c::{self, I2c, SlaveAddrConfig, SlaveCommandKind},
     interrupt,
-    peripherals::{self},
+    peripherals::{self, DMA1_CH6, DMA1_CH7},
     time::khz,
 };
 use mcp23017_peripheral::{
@@ -24,13 +24,15 @@ bind_interrupts!(struct Irqs {
     I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
     EXTI15_10  => exti::InterruptHandler<interrupt::typelevel::EXTI15_10>;
     EXTI9_5  => exti::InterruptHandler<interrupt::typelevel::EXTI9_5>;
+    DMA1_CHANNEL6 => dma::InterruptHandler<DMA1_CH6>;
+    DMA1_CHANNEL7 => dma::InterruptHandler<DMA1_CH7>;
 });
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let p = embassy_stm32::init(Default::default());
 
-    let mut i2c = I2c::new(p.I2C1, p.PB6, p.PB7, Irqs, p.DMA1_CH6, p.DMA1_CH7, {
+    let mut i2c = I2c::new(p.I2C1, p.PB6, p.PB7, p.DMA1_CH6, p.DMA1_CH7, Irqs, {
         let mut config = i2c::Config::default();
         config.frequency = khz(400);
         config
