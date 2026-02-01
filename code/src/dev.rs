@@ -1,14 +1,15 @@
 #![no_std]
 #![no_main]
 
-use core::iter::{once, repeat};
-
-use defmt::{Debug2Format, info, warn};
-use display_interface::DisplayError;
-use embassy_embedded_hal::{
-    adapter::BlockingAsync,
-    shared_bus::asynch::{i2c::I2cDeviceWithConfig, spi::SpiDeviceWithConfig},
+use core::{
+    array,
+    cell::RefCell,
+    iter::{once, repeat, zip},
 };
+
+use defmt::{Debug2Format, debug, info, warn};
+use display_interface::DisplayError;
+use embassy_embedded_hal::{adapter::BlockingAsync, shared_bus::asynch::i2c::I2cDeviceWithConfig};
 use embassy_executor::Spawner;
 use embassy_futures::join::*;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
@@ -26,7 +27,12 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffer};
-use lib::{RotaryButton, RotaryInput2};
+use heapless::Vec;
+use lib::{
+    RotaryButton, RotaryInput2,
+    lazy_shared_spi::{LazySharedSpi, SpiDeviceWithConfig},
+    lazy_shared_spi_2::{LazySharedSpi2, SpiDeviceWithConfig2},
+};
 use mcp23017_controller::Mcp23017;
 use mfrc522::{
     AsyncMfrc522, AsyncPollingWaiterProvider, CardCommandError, ReqWupA, RxGain, Select,
@@ -65,15 +71,6 @@ async fn main(spawner: Spawner) {
             .unwrap()
             .with_scl(p.GPIO5)
             .with_sda(p.GPIO6)
-            .into_async(),
-    );
-
-    let spi = Mutex::<CriticalSectionRawMutex, _>::new(
-        Spi::new(p.SPI2, Default::default())
-            .unwrap()
-            .with_sck(p.GPIO4)
-            .with_mosi(p.GPIO3)
-            .with_miso(p.GPIO2)
             .into_async(),
     );
 
@@ -138,58 +135,100 @@ async fn main(spawner: Spawner) {
             },
         ),
         async {
-            info!("creating spi");
-
-            info!("configuring  CS");
-            let cs = ep.A0.into_output(PinState::High).await;
-            // let cs = BlockingAsync::new(Output::new(p.GPIO21, Level::High, Default::default()));
-            info!("Configured CS");
-
-            let mut m = AsyncMfrc522::new(
-                SpiRegisterAccess::new(SpiDeviceWithConfig::new(
-                    &spi,
-                    cs,
-                    esp_hal::spi::master::Config::default()
-                        .with_frequency(Rate::from_mhz(10))
-                        .with_mode(Mode::_0),
-                )),
-                AsyncPollingWaiterProvider::new(Delay, 25),
+            let cs_pins = [ep.A0, ep.A1, ep.A2, ep.A3, ep.A4, ep.A5];
+            let cs_pins =
+                join_array(cs_pins.map(async |pin| pin.into_output(PinState::High).await)).await;
+            let spi = LazySharedSpi2::<_, CriticalSectionRawMutex, _>::new(
+                Spi::new(p.SPI2, Default::default())
+                    .unwrap()
+                    .with_sck(p.GPIO4)
+                    .with_mosi(p.GPIO3)
+                    .with_miso(p.GPIO2)
+                    .into_async(),
+                cs_pins,
             );
-            let version = m.version().await.unwrap();
-            info!("mfrc522 version: {:#04X}", version);
-            info!("soft resetting");
-            m.soft_reset().await.unwrap();
-            info!("initializing");
-            m.init().await.unwrap();
-            info!("setting antenna gain");
-            m.set_antenna_gain(RxGain::DB18).await.unwrap();
-            loop {
-                m.set_antenna_enabled(true).await.unwrap();
-                info!("Doing  WUPA");
-                match m.card_command(ReqWupA::new(true)).await {
-                    Ok(atq_a) => {
-                        info!("Doing SELECT");
-                        match m.card_command(Select::new(&atq_a).unwrap()).await {
-                            Ok(uid) => {
-                                info!("detected uid: {}", uid);
+            let mut devices = array::from_fn::<_, 6, _>(|cs_index| {
+                AsyncMfrc522::new(
+                    SpiRegisterAccess::new(SpiDeviceWithConfig2::new(
+                        &spi,
+                        cs_index,
+                        esp_hal::spi::master::Config::default()
+                            .with_frequency(Rate::from_mhz(10))
+                            .with_mode(Mode::_0),
+                        Delay,
+                    )),
+                    AsyncPollingWaiterProvider::new(Delay, 25),
+                )
+            });
+            let present_devices = join_array(devices.each_mut().map(async |device| {
+                let version = device.version().await.unwrap();
+                info!(
+                    "version: {:#04X}. chip type: {:#04X}. version: {:#04X}",
+                    version,
+                    version.get_chip_type(),
+                    version.get_version()
+                );
+                version.get_chip_type() == 0x9 && version.get_version() == 0x2
+            }))
+            .await;
+            info!("present mfrc522 devices: {}", present_devices);
+            let n_present_devices = present_devices
+                .iter()
+                .copied()
+                .filter(|is_present| *is_present)
+                .count();
+            if n_present_devices > 0 {
+                // Initialize all present devices
+                for device in zip(&mut devices, present_devices)
+                    .filter_map(|(device, is_present)| if is_present { Some(device) } else { None })
+                {
+                    device.soft_reset().await.unwrap();
+                    device.init().await.unwrap();
+                    device.set_antenna_gain(RxGain::DB18).await.unwrap();
+                }
+                // Check for cards at one device at a time
+                // There are two reasons why we are only checking one device at a time
+                // One is that they can interfere with each other
+                // Another reason is to not overload the 5V to 3.3V converter on the esp32c3
+                loop {
+                    let mut ids = Vec::<_, 6>::new();
+                    let mut i = 0;
+                    while i < n_present_devices {
+                        let (device, index) = zip(&mut devices, present_devices)
+                            .filter(|(_device, is_present)| *is_present)
+                            .nth(i)
+                            .unwrap();
+                        device.set_antenna_enabled(true).await.unwrap();
+                        debug!("Doing  WUPA");
+                        match device.card_command(ReqWupA::new(true)).await {
+                            Ok(atq_a) => {
+                                debug!("Doing SELECT");
+                                match device.card_command(Select::new(&atq_a).unwrap()).await {
+                                    Ok(uid) => {
+                                        // info!("detected uid: {}", uid);
+                                        ids.push(uid).unwrap();
+                                    }
+                                    Err(CardCommandError::CardCommand(e)) => {
+                                        warn!("SELECT error: {}", e);
+                                    }
+                                    result => {
+                                        result.unwrap();
+                                    }
+                                }
                             }
                             Err(CardCommandError::CardCommand(e)) => {
-                                warn!("SELECT error: {}", e);
+                                debug!("WupA error: {}", e);
                             }
                             result => {
                                 result.unwrap();
                             }
-                        }
+                        };
+                        device.set_antenna_enabled(false).await.unwrap();
+                        i += 1;
                     }
-                    Err(CardCommandError::CardCommand(e)) => {
-                        warn!("WupA error: {}", e);
-                    }
-                    result => {
-                        result.unwrap();
-                    }
-                };
-                m.set_antenna_enabled(false).await.unwrap();
-                Timer::after_millis(50).await;
+                    info!("scanned ids: {}", ids);
+                    Timer::after_millis(500).await;
+                }
             }
         },
     )

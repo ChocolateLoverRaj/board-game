@@ -11,6 +11,8 @@ mod rotary_encoder;
 mod rotary_input;
 mod scale_rgb;
 // mod scan_and_choose;
+pub mod lazy_shared_spi;
+pub mod lazy_shared_spi_2;
 mod scanning_event_handler;
 mod storage;
 
