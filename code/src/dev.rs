@@ -4,9 +4,11 @@
 use core::{
     array,
     cell::RefCell,
-    iter::{once, repeat, zip},
+    iter::{once, repeat, repeat_n, zip},
 };
 
+use collect_array_ext_trait::CollectArray;
+use common::Request;
 use defmt::{Debug2Format, debug, error, info, warn};
 use display_interface::DisplayError;
 use embassy_embedded_hal::{adapter::BlockingAsync, shared_bus::asynch::i2c::I2cDeviceWithConfig};
@@ -15,6 +17,7 @@ use embassy_futures::join::*;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Delay, Timer};
 use embedded_hal::digital::PinState;
+use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
@@ -111,17 +114,59 @@ async fn main(spawner: Spawner) {
         },
         async {
             let mut buffer = [Default::default(); 1024];
+            let mut led_level = false;
+            let mut n = 0;
+            const TOTAL_LEDS: usize = 64;
             loop {
-                uart.write_async(&[0, 1, 2, 3, 4]).await.unwrap();
-                match uart.read_async(&mut buffer).await {
-                    Ok(bytes_received) => {
-                        let bytes = &buffer[..bytes_received];
-                        info!("received: {}", bytes);
-                    }
+                n += 1;
+                if n == TOTAL_LEDS {
+                    n = 0;
+                }
+                let alternate_color = if n.is_multiple_of(2) {
+                    RGB::new(255, 165, 0)
+                } else {
+                    RGB::new(255, 50, 0)
+                };
+                let leds = brightness(
+                    repeat_n(alternate_color, n)
+                        .chain(once(RGB::new(255, 0, 0)))
+                        .chain(repeat_n(alternate_color, TOTAL_LEDS - n - 1)),
+                    5,
+                );
+
+                let mut bytes_written = 0;
+                bytes_written += postcard::to_slice_cobs(
+                    &Request::SetLed(led_level),
+                    &mut buffer[bytes_written..],
+                )
+                .unwrap()
+                .len();
+                bytes_written += postcard::to_slice_cobs(
+                    &Request::SetLeds(leds.collect_array().unwrap()),
+                    &mut buffer[bytes_written..],
+                )
+                .unwrap()
+                .len();
+
+                match uart.write_all(&buffer[..bytes_written]).await {
+                    Ok(()) => {}
                     Err(e) => {
-                        error!("UART rx error: {}", e);
+                        warn!("Error writing to UART: {}", e);
                     }
                 }
+                led_level = !led_level;
+                Timer::after_millis(100).await;
+
+                // uart.write_async(&[0, 1, 2, 3, 4]).await.unwrap();
+                // match uart.read_async(&mut buffer).await {
+                //     Ok(bytes_received) => {
+                //         let bytes = &buffer[..bytes_received];
+                //         info!("received: {}", bytes);
+                //     }
+                //     Err(e) => {
+                //         error!("UART rx error: {}", e);
+                //     }
+                // }
             }
         },
     )
@@ -285,43 +330,4 @@ async fn main(spawner: Spawner) {
     //     },
     // )
     // .await;
-}
-
-// TODO: We probably need a 3.3V to 5V logic level converter
-#[embassy_executor::task]
-async fn leds_task(rmt: RMT<'static>, pin: GPIO7<'static>) {
-    const TOTAL_LEDS: usize = 64;
-    let mut buffer = smart_led_buffer!(buffer_size_async(TOTAL_LEDS));
-    let mut leds_adapter = SmartLedsAdapterAsync::new(
-        Rmt::new(rmt, Rate::from_mhz(80))
-            .unwrap()
-            .into_async()
-            .channel0,
-        pin,
-        &mut buffer,
-    );
-
-    let mut n = 0;
-    loop {
-        n += 1;
-        if n == TOTAL_LEDS {
-            n = 0;
-        }
-        let alternate_color = if n.is_multiple_of(2) {
-            RGB::new(255, 165, 0)
-        } else {
-            RGB::new(255, 50, 0)
-        };
-        leds_adapter
-            .write(brightness(
-                repeat(alternate_color)
-                    .take(n)
-                    .chain(once(RGB::new(255, 0, 0)))
-                    .chain(repeat(alternate_color).take(TOTAL_LEDS - n - 1)),
-                5,
-            ))
-            .await
-            .unwrap();
-        Timer::after_millis(100).await;
-    }
 }
