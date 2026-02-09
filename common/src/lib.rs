@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use smart_leds::RGB;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     SetLed(bool),

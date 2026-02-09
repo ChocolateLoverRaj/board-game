@@ -1,10 +1,8 @@
 #![no_std]
 #![no_main]
 
-use core::iter::{once, repeat_n};
-
 use common::Request;
-use defmt::{Debug2Format, info, warn};
+use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_stm32::{
     Config, Peri, bind_interrupts,
@@ -15,8 +13,8 @@ use embassy_stm32::{
     time::{khz, mhz},
     usart::Uart,
 };
-use embassy_time::Timer;
-use smart_leds::{RGB, SmartLedsWriteAsync, brightness};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use smart_leds::{RGB, SmartLedsWriteAsync};
 use ws2812_async::{Grb, Ws2812};
 use {defmt_rtt as _, panic_probe as _};
 
@@ -47,14 +45,7 @@ async fn main(spawner: Spawner) -> ! {
         config
     });
 
-    // spawner.spawn(leds_task(p.SPI1, p.PA7, p.DMA1_CH3)).unwrap();
-    let spi = Spi::new_txonly_nosck(p.SPI1, p.PA7, p.DMA1_CH3, {
-        let mut config = spi::Config::default();
-        config.frequency = khz(3800);
-        config
-    });
-    const TOTAL_LEDS: usize = 64;
-    let mut leds = Ws2812::<_, Grb, TOTAL_LEDS>::new(spi);
+    spawner.spawn(leds_task(p.SPI1, p.PA7, p.DMA1_CH3)).unwrap();
 
     let mut led = Output::new(p.PC13, Level::High, Speed::Low);
 
@@ -85,15 +76,15 @@ async fn main(spawner: Spawner) -> ! {
                 None => break,
             };
             let packet_len = zero_index + 1;
-            match postcard::take_from_bytes_cobs::<Request>(&mut buffer[..packet_len]) {
-                Ok((request, remaining_bytes)) => {
-                    info!("Received request: {}", Debug2Format(&request));
+            match postcard::from_bytes_cobs::<Request>(&mut buffer[..packet_len]) {
+                Ok(request) => {
+                    // info!("Received request: {}", Debug2Format(&request));
                     match request {
                         Request::SetLed(state) => {
                             led.set_level(state.into());
                         }
                         Request::SetLeds(colors) => {
-                            leds.write(colors).await.unwrap();
+                            LEDS_SIGNAL.signal(colors);
                         }
                     }
                 }
@@ -108,6 +99,8 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
+const TOTAL_LEDS: usize = 64;
+static LEDS_SIGNAL: Signal<CriticalSectionRawMutex, [RGB<u8>; TOTAL_LEDS]> = Signal::new();
 #[embassy_executor::task]
 async fn leds_task(
     spi: Peri<'static, SPI1>,
@@ -119,28 +112,9 @@ async fn leds_task(
         config.frequency = khz(3800);
         config
     });
-    const TOTAL_LEDS: usize = 64;
     let mut leds = Ws2812::<_, Grb, TOTAL_LEDS>::new(spi);
-
-    let mut n = 0;
     loop {
-        n += 1;
-        if n == TOTAL_LEDS {
-            n = 0;
-        }
-        let alternate_color = if n.is_multiple_of(2) {
-            RGB::new(255, 165, 0)
-        } else {
-            RGB::new(255, 50, 0)
-        };
-        leds.write(brightness(
-            repeat_n(alternate_color, n)
-                .chain(once(RGB::new(255, 0, 0)))
-                .chain(repeat_n(alternate_color, TOTAL_LEDS - n - 1)),
-            5,
-        ))
-        .await
-        .unwrap();
-        Timer::after_millis(100).await;
+        let colors = LEDS_SIGNAL.wait().await;
+        leds.write(colors).await.unwrap();
     }
 }

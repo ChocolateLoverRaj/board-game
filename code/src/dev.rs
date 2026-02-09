@@ -14,7 +14,9 @@ use display_interface::DisplayError;
 use embassy_embedded_hal::{adapter::BlockingAsync, shared_bus::asynch::i2c::I2cDeviceWithConfig};
 use embassy_executor::Spawner;
 use embassy_futures::join::*;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, priority_channel, signal::Signal,
+};
 use embassy_time::{Delay, Timer};
 use embedded_hal::digital::PinState;
 use embedded_io_async::Write;
@@ -23,7 +25,7 @@ use esp_hal::{
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
-    peripherals::{GPIO7, RMT},
+    peripherals::{GPIO7, GPIO8, RMT, UART0},
     rmt::Rmt,
     spi::{Mode, master::Spi},
     time::Rate,
@@ -70,11 +72,12 @@ async fn main(spawner: Spawner) {
     // reset_pin.set_high();
     // Timer::after_nanos(37_740).await;
 
-    let mut uart = Uart::new(p.UART0, uart::Config::default().with_baudrate(4_500_000))
-        .unwrap()
-        .with_tx(p.GPIO8)
-        .with_rx(p.GPIO7)
-        .into_async();
+    spawner.spawn(uart_task(p.UART0, p.GPIO8, p.GPIO7)).unwrap();
+    // let mut uart = Uart::new(p.UART0, uart::Config::default().with_baudrate(4_500_000))
+    //     .unwrap()
+    //     .with_tx(p.GPIO8)
+    //     .with_rx(p.GPIO7)
+    //     .into_async();
 
     let i2c = Mutex::<CriticalSectionRawMutex, _>::new(
         I2c::new(p.I2C0, i2c::master::Config::default())
@@ -84,7 +87,7 @@ async fn main(spawner: Spawner) {
             .into_async(),
     );
 
-    join(
+    join3(
         async {
             let result: Result<(), DisplayError> = async {
                 let i2c = I2cDeviceWithConfig::new(
@@ -113,8 +116,6 @@ async fn main(spawner: Spawner) {
             }
         },
         async {
-            let mut buffer = [Default::default(); 1024];
-            let mut led_level = false;
             let mut n = 0;
             const TOTAL_LEDS: usize = 64;
             loop {
@@ -134,39 +135,18 @@ async fn main(spawner: Spawner) {
                     5,
                 );
 
-                let mut bytes_written = 0;
-                bytes_written += postcard::to_slice_cobs(
-                    &Request::SetLed(led_level),
-                    &mut buffer[bytes_written..],
-                )
-                .unwrap()
-                .len();
-                bytes_written += postcard::to_slice_cobs(
-                    &Request::SetLeds(leds.collect_array().unwrap()),
-                    &mut buffer[bytes_written..],
-                )
-                .unwrap()
-                .len();
-
-                match uart.write_all(&buffer[..bytes_written]).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        warn!("Error writing to UART: {}", e);
-                    }
-                }
-                led_level = !led_level;
+                SIGNALS[1].signal(Request::SetLeds(leds.collect_array().unwrap()));
+                NEW_REQUEST_SIGNAL.signal(());
                 Timer::after_millis(100).await;
-
-                // uart.write_async(&[0, 1, 2, 3, 4]).await.unwrap();
-                // match uart.read_async(&mut buffer).await {
-                //     Ok(bytes_received) => {
-                //         let bytes = &buffer[..bytes_received];
-                //         info!("received: {}", bytes);
-                //     }
-                //     Err(e) => {
-                //         error!("UART rx error: {}", e);
-                //     }
-                // }
+            }
+        },
+        async {
+            let mut led_level = false;
+            loop {
+                SIGNALS[0].signal(Request::SetLed(led_level));
+                NEW_REQUEST_SIGNAL.signal(());
+                led_level = !led_level;
+                Timer::after_secs(1).await;
             }
         },
     )
@@ -330,4 +310,36 @@ async fn main(spawner: Spawner) {
     //     },
     // )
     // .await;
+}
+
+static SIGNALS: [Signal<CriticalSectionRawMutex, Request>; 2] = [Signal::new(), Signal::new()];
+static NEW_REQUEST_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+#[embassy_executor::task]
+async fn uart_task(uart: UART0<'static>, tx: GPIO8<'static>, rx: GPIO7<'static>) {
+    let mut uart = Uart::new(uart, uart::Config::default().with_baudrate(4_500_000))
+        .unwrap()
+        .with_tx(tx)
+        .with_rx(rx)
+        .into_async();
+    let mut buffer = [Default::default(); 1024];
+    loop {
+        NEW_REQUEST_SIGNAL.wait().await;
+        for request in SIGNALS
+            .each_ref()
+            .map(|signal| signal.try_take())
+            .into_iter()
+            .flatten()
+        {
+            let bytes_written = postcard::to_slice_cobs(&request, &mut buffer)
+                .unwrap()
+                .len();
+            match uart.write_all(&buffer[..bytes_written]).await {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!("Error writing to UART: {}", e);
+                }
+            }
+        }
+    }
 }
