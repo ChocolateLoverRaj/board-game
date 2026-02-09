@@ -8,7 +8,7 @@ use core::{
 };
 
 use collect_array_ext_trait::CollectArray;
-use common::Request;
+use common::{Event, Request};
 use defmt::{Debug2Format, debug, error, info, warn};
 use display_interface::DisplayError;
 use embassy_embedded_hal::{adapter::BlockingAsync, shared_bus::asynch::i2c::I2cDeviceWithConfig};
@@ -22,6 +22,7 @@ use embedded_hal::digital::PinState;
 use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
+    Async,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
@@ -30,7 +31,7 @@ use esp_hal::{
     spi::{Mode, master::Spi},
     time::Rate,
     timer::timg::TimerGroup,
-    uart::{self, Uart},
+    uart::{self, Uart, UartRx, UartTx},
 };
 use esp_hal_smartled::{SmartLedsAdapterAsync, buffer_size_async, smart_led_buffer};
 use heapless::Vec;
@@ -72,12 +73,26 @@ async fn main(spawner: Spawner) {
     // reset_pin.set_high();
     // Timer::after_nanos(37_740).await;
 
-    spawner.spawn(uart_task(p.UART0, p.GPIO8, p.GPIO7)).unwrap();
-    // let mut uart = Uart::new(p.UART0, uart::Config::default().with_baudrate(4_500_000))
-    //     .unwrap()
-    //     .with_tx(p.GPIO8)
-    //     .with_rx(p.GPIO7)
-    //     .into_async();
+    let (uart_rx, uart_tx) = Uart::new(p.UART0, uart::Config::default().with_baudrate(4_500_000))
+        .unwrap()
+        .with_tx(p.GPIO8)
+        .with_rx(p.GPIO7)
+        .into_async()
+        .split();
+    spawner.spawn(uart_tx_task(uart_tx)).unwrap();
+    spawner.spawn(uart_rx_task(uart_rx)).unwrap();
+
+    // Soft reset
+    info!("Soft resetting");
+    REQUEST_SIGNALS[0].signal(Request::SoftReset);
+    NEW_REQUEST_SIGNAL.signal(());
+    SOFT_RESET_SIGNAL.wait().await;
+    info!("Done  soft resetting");
+
+    spawner.spawn(led_task()).unwrap();
+    spawner.spawn(leds_task()).unwrap();
+    spawner.spawn(rotary_switch_task()).unwrap();
+    spawner.spawn(rotary_encoder_task()).unwrap();
 
     let i2c = Mutex::<CriticalSectionRawMutex, _>::new(
         I2c::new(p.I2C0, i2c::master::Config::default())
@@ -87,70 +102,31 @@ async fn main(spawner: Spawner) {
             .into_async(),
     );
 
-    join3(
-        async {
-            let result: Result<(), DisplayError> = async {
-                let i2c = I2cDeviceWithConfig::new(
-                    &i2c,
-                    i2c::master::Config::default().with_frequency(Rate::from_khz(400)),
-                );
-                let mut display = Ssd1306Async::new(
-                    I2CDisplayInterface::new(i2c),
-                    DisplaySize128x64,
-                    DisplayRotation::Rotate0,
-                )
-                .into_buffered_graphics_mode();
-                display.init().await?;
-                display.clear_buffer();
-                display.flush().await?;
-                let mut invert = false;
-                loop {
-                    display.set_invert(invert).await?;
-                    Timer::after_millis(5000).await;
-                    invert = !invert;
-                }
-            }
-            .await;
-            if let Err(e) = result {
-                warn!("display error: {}", Debug2Format(&e));
-            }
-        },
-        async {
-            let mut n = 0;
-            const TOTAL_LEDS: usize = 64;
-            loop {
-                n += 1;
-                if n == TOTAL_LEDS {
-                    n = 0;
-                }
-                let alternate_color = if n.is_multiple_of(2) {
-                    RGB::new(255, 165, 0)
-                } else {
-                    RGB::new(255, 50, 0)
-                };
-                let leds = brightness(
-                    repeat_n(alternate_color, n)
-                        .chain(once(RGB::new(255, 0, 0)))
-                        .chain(repeat_n(alternate_color, TOTAL_LEDS - n - 1)),
-                    5,
-                );
-
-                SIGNALS[1].signal(Request::SetLeds(leds.collect_array().unwrap()));
-                NEW_REQUEST_SIGNAL.signal(());
-                Timer::after_millis(100).await;
-            }
-        },
-        async {
-            let mut led_level = false;
-            loop {
-                SIGNALS[0].signal(Request::SetLed(led_level));
-                NEW_REQUEST_SIGNAL.signal(());
-                led_level = !led_level;
-                Timer::after_secs(1).await;
-            }
-        },
-    )
+    let result: Result<(), DisplayError> = async {
+        let i2c = I2cDeviceWithConfig::new(
+            &i2c,
+            i2c::master::Config::default().with_frequency(Rate::from_khz(400)),
+        );
+        let mut display = Ssd1306Async::new(
+            I2CDisplayInterface::new(i2c),
+            DisplaySize128x64,
+            DisplayRotation::Rotate0,
+        )
+        .into_buffered_graphics_mode();
+        display.init().await?;
+        display.clear_buffer();
+        display.flush().await?;
+        let mut invert = false;
+        loop {
+            display.set_invert(invert).await?;
+            Timer::after_millis(5000).await;
+            invert = !invert;
+        }
+    }
     .await;
+    if let Err(e) = result {
+        warn!("display error: {}", Debug2Format(&e));
+    }
     //let mut mcp23017 = Mcp23017::new(
     //    I2cDeviceWithConfig::new(
     //        &i2c,
@@ -312,34 +288,136 @@ async fn main(spawner: Spawner) {
     // .await;
 }
 
-static SIGNALS: [Signal<CriticalSectionRawMutex, Request>; 2] = [Signal::new(), Signal::new()];
+type M = CriticalSectionRawMutex;
+
+static REQUEST_SIGNALS: [Signal<M, Request>; 5] = [
+    Signal::new(),
+    Signal::new(),
+    Signal::new(),
+    Signal::new(),
+    Signal::new(),
+];
 static NEW_REQUEST_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 #[embassy_executor::task]
-async fn uart_task(uart: UART0<'static>, tx: GPIO8<'static>, rx: GPIO7<'static>) {
-    let mut uart = Uart::new(uart, uart::Config::default().with_baudrate(4_500_000))
-        .unwrap()
-        .with_tx(tx)
-        .with_rx(rx)
-        .into_async();
+async fn uart_tx_task(mut uart_tx: UartTx<'static, Async>) {
     let mut buffer = [Default::default(); 1024];
     loop {
         NEW_REQUEST_SIGNAL.wait().await;
-        for request in SIGNALS
-            .each_ref()
-            .map(|signal| signal.try_take())
-            .into_iter()
-            .flatten()
-        {
+        for request in REQUEST_SIGNALS.iter().flat_map(|signal| signal.try_take()) {
             let bytes_written = postcard::to_slice_cobs(&request, &mut buffer)
                 .unwrap()
                 .len();
-            match uart.write_all(&buffer[..bytes_written]).await {
+            match uart_tx.write_all(&buffer[..bytes_written]).await {
                 Ok(()) => {}
                 Err(e) => {
                     warn!("Error writing to UART: {}", e);
                 }
             }
         }
+    }
+}
+
+static SOFT_RESET_SIGNAL: Signal<M, ()> = Signal::new();
+static ROTARY_SWITCH_SIGNAL: Signal<M, bool> = Signal::new();
+static ROTARY_ENCODER_SIGNAL: Signal<M, i64> = Signal::new();
+
+#[embassy_executor::task]
+async fn uart_rx_task(mut uart_rx: UartRx<'static, Async>) {
+    let mut buffer = [Default::default(); 1024];
+    let mut buffer_len = 0;
+    loop {
+        match uart_rx.read_async(&mut buffer[buffer_len..]).await {
+            Ok(bytes_read) => {
+                buffer_len += bytes_read;
+                loop {
+                    let data = &mut buffer[..buffer_len];
+                    let zero_pos = match data.iter().copied().position(|byte| byte == 0) {
+                        Some(pos) => pos,
+                        None => break,
+                    };
+                    let packet_len = zero_pos + 1;
+                    match postcard::from_bytes_cobs::<Event>(&mut data[..packet_len]) {
+                        Ok(event) => match event {
+                            Event::SoftResetComplete => {
+                                SOFT_RESET_SIGNAL.signal(());
+                            }
+                            Event::RotarySwitch(value) => {
+                                ROTARY_SWITCH_SIGNAL.signal(value);
+                            }
+                            Event::RotaryEncoder(value) => {
+                                ROTARY_ENCODER_SIGNAL.signal(value);
+                            }
+                        },
+                        Err(e) => {
+                            error!("error deserializing packet: {}", e);
+                        }
+                    }
+                    buffer.copy_within(packet_len..buffer_len, 0);
+                    buffer_len -= packet_len;
+                }
+            }
+            Err(e) => {
+                error!("Error receiving UART data: {}", e);
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn leds_task() {
+    let mut n = 0;
+    const TOTAL_LEDS: usize = 64;
+    loop {
+        n += 1;
+        if n == TOTAL_LEDS {
+            n = 0;
+        }
+        let alternate_color = if n.is_multiple_of(2) {
+            RGB::new(255, 165, 0)
+        } else {
+            RGB::new(255, 50, 0)
+        };
+        let leds = brightness(
+            repeat_n(alternate_color, n)
+                .chain(once(RGB::new(255, 0, 0)))
+                .chain(repeat_n(alternate_color, TOTAL_LEDS - n - 1)),
+            5,
+        );
+
+        REQUEST_SIGNALS[2].signal(Request::SetLeds(leds.collect_array().unwrap()));
+        NEW_REQUEST_SIGNAL.signal(());
+        Timer::after_millis(100).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn led_task() {
+    let mut led_level = false;
+    loop {
+        REQUEST_SIGNALS[1].signal(Request::SetLed(led_level));
+        NEW_REQUEST_SIGNAL.signal(());
+        led_level = !led_level;
+        Timer::after_secs(1).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn rotary_switch_task() {
+    REQUEST_SIGNALS[3].signal(Request::WatchRotarySwitch(true));
+    NEW_REQUEST_SIGNAL.signal(());
+    loop {
+        let is_pressed = ROTARY_SWITCH_SIGNAL.wait().await;
+        info!("rotary button pressed? {}", is_pressed);
+    }
+}
+
+#[embassy_executor::task]
+async fn rotary_encoder_task() {
+    REQUEST_SIGNALS[4].signal(Request::WatchRotaryEncoder(true));
+    NEW_REQUEST_SIGNAL.signal(());
+    loop {
+        let position = ROTARY_ENCODER_SIGNAL.wait().await;
+        info!("rotary encoder position: {}", position);
     }
 }

@@ -1,26 +1,43 @@
 #![no_std]
 #![no_main]
+mod debouncer;
 
-use common::Request;
-use defmt::{info, warn};
+use crate::debouncer::Debouncer;
+use common::{Event, Request};
+use defmt::{debug, warn};
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either3, Either5, select3, select5};
 use embassy_stm32::{
     Config, Peri, bind_interrupts,
-    gpio::{Level, Output, Speed},
-    peripherals::{DMA1_CH3, PA7, SPI1},
+    exti::ExtiInput,
+    gpio::{Level, Output, Pull, Speed},
+    mode::Async,
+    peripherals::{DMA1_CH3, EXTI0, EXTI1, EXTI2, PA0, PA1, PA2, PA7, SPI1},
     rcc::{self, APBPrescaler, Hse, HseMode, Pll, PllMul, PllPreDiv, PllSource, Sysclk},
     spi::{self, Spi},
     time::{khz, mhz},
-    usart::Uart,
+    usart::{Uart, UartTx},
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_time::{Duration, Instant};
+use embedded_io_async::Write;
+use pure_rotary_encoder::{Direction, RotaryEncoder, RotaryPinsState};
 use smart_leds::{RGB, SmartLedsWriteAsync};
 use ws2812_async::{Grb, Ws2812};
+
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     USART1 => embassy_stm32::usart::InterruptHandler<embassy_stm32::peripherals::USART1>;
+    EXTI0 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI0>;
+    EXTI1 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI1>;
+    EXTI2 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI2>;
 });
+
+type M = CriticalSectionRawMutex;
+
+static NEW_EVENT_SIGNAL: Signal<M, ()> = Signal::new();
+static EVENT_SIGNALS: [Signal<M, Event>; 3] = [Signal::new(), Signal::new(), Signal::new()];
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
@@ -46,6 +63,10 @@ async fn main(spawner: Spawner) -> ! {
     });
 
     spawner.spawn(leds_task(p.SPI1, p.PA7, p.DMA1_CH3)).unwrap();
+    spawner.spawn(rotary_switch_task(p.PA0, p.EXTI0)).unwrap();
+    spawner
+        .spawn(rotary_encoder_task(p.PA1, p.EXTI1, p.PA2, p.EXTI2))
+        .unwrap();
 
     let mut led = Output::new(p.PC13, Level::High, Speed::Low);
 
@@ -56,17 +77,18 @@ async fn main(spawner: Spawner) -> ! {
         config
     })
     .unwrap();
-    let (mut uart_tx, uart_rx) = uart.split();
+    let (uart_tx, uart_rx) = uart.split();
+    spawner.spawn(uart_tx_task(uart_tx)).unwrap();
+
     let mut dma_buf = [Default::default(); 1024];
     let mut uart_rx = uart_rx.into_ring_buffered(&mut dma_buf);
     let mut buffer = [Default::default(); 1024];
     let mut buffer_bytes = 0;
-    info!("waiting to receive bytes");
     loop {
         let new_bytes_read = uart_rx.read(&mut buffer[buffer_bytes..]).await.unwrap();
         {
             let new_bytes = &buffer[buffer_bytes..buffer_bytes + new_bytes_read];
-            info!("received bytes: {}", new_bytes);
+            debug!("received bytes: {}", new_bytes);
             buffer_bytes += new_bytes_read;
         }
         loop {
@@ -77,17 +99,27 @@ async fn main(spawner: Spawner) -> ! {
             };
             let packet_len = zero_index + 1;
             match postcard::from_bytes_cobs::<Request>(&mut buffer[..packet_len]) {
-                Ok(request) => {
-                    // info!("Received request: {}", Debug2Format(&request));
-                    match request {
-                        Request::SetLed(state) => {
-                            led.set_level(state.into());
-                        }
-                        Request::SetLeds(colors) => {
-                            LEDS_SIGNAL.signal(colors);
-                        }
+                Ok(request) => match request {
+                    Request::SoftReset => {
+                        led.set_high();
+                        LEDS_SIGNAL.signal([Default::default(); _]);
+                        WATCH_ROTARY_SWITCH_SIGNAL.signal(false);
+                        EVENT_SIGNALS[0].signal(Event::SoftResetComplete);
+                        NEW_EVENT_SIGNAL.signal(());
                     }
-                }
+                    Request::SetLed(state) => {
+                        led.set_level(state.into());
+                    }
+                    Request::SetLeds(colors) => {
+                        LEDS_SIGNAL.signal(colors);
+                    }
+                    Request::WatchRotarySwitch(watch) => {
+                        WATCH_ROTARY_SWITCH_SIGNAL.signal(watch);
+                    }
+                    Request::WatchRotaryEncoder(watch) => {
+                        WATCH_ROTARY_ENCODER_SIGNAL.signal(watch);
+                    }
+                },
                 Err(e) => {
                     warn!("Error: {}", e);
                 }
@@ -95,7 +127,23 @@ async fn main(spawner: Spawner) -> ! {
             buffer.copy_within(packet_len..buffer_bytes, 0);
             buffer_bytes -= packet_len;
         }
-        uart_tx.write(&[6, 7]).await.unwrap();
+    }
+}
+
+#[embassy_executor::task]
+async fn uart_tx_task(mut uart_tx: UartTx<'static, Async>) {
+    let mut buffer = [Default::default(); 1024];
+    loop {
+        NEW_EVENT_SIGNAL.wait().await;
+        for event in EVENT_SIGNALS.iter().flat_map(|event| event.try_take()) {
+            let bytes_written = postcard::to_slice_cobs(&event, &mut buffer).unwrap().len();
+            match uart_tx.write_all(&buffer[..bytes_written]).await {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!("Error writing to UART: {}", e);
+                }
+            }
+        }
     }
 }
 
@@ -116,5 +164,145 @@ async fn leds_task(
     loop {
         let colors = LEDS_SIGNAL.wait().await;
         leds.write(colors).await.unwrap();
+    }
+}
+
+static WATCH_ROTARY_SWITCH_SIGNAL: Signal<M, bool> = Signal::new();
+#[embassy_executor::task]
+async fn rotary_switch_task(pin: Peri<'static, PA0>, exti: Peri<'static, EXTI0>) {
+    let mut sw = ExtiInput::new(pin, exti, Pull::Up, Irqs);
+    loop {
+        // Wait for enable
+        loop {
+            if WATCH_ROTARY_SWITCH_SIGNAL.wait().await {
+                break;
+            }
+        }
+        let mut debouncer = Debouncer::new(Duration::from_millis(1));
+        loop {
+            let new_value = debouncer.process_data(sw.get_level(), Instant::now());
+            if let Some(&new_value) = new_value {
+                EVENT_SIGNALS[1].signal(Event::RotarySwitch(new_value == Level::Low));
+                NEW_EVENT_SIGNAL.signal(());
+            }
+            match select3(
+                {
+                    let value = *debouncer.maybe_stable_value().unwrap();
+                    let sw = &mut sw;
+                    async move {
+                        match value {
+                            Level::Low => sw.wait_for_high().await,
+                            Level::High => sw.wait_for_low().await,
+                        }
+                    }
+                },
+                debouncer.wait(),
+                async {
+                    loop {
+                        if !WATCH_ROTARY_SWITCH_SIGNAL.wait().await {
+                            break;
+                        }
+                    }
+                },
+            )
+            .await
+            {
+                Either3::First(()) | Either3::Second(()) => {}
+                Either3::Third(()) => {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+static WATCH_ROTARY_ENCODER_SIGNAL: Signal<M, bool> = Signal::new();
+#[embassy_executor::task]
+async fn rotary_encoder_task(
+    dt: Peri<'static, PA1>,
+    dt_exti: Peri<'static, EXTI1>,
+    clk: Peri<'static, PA2>,
+    clk_exti: Peri<'static, EXTI2>,
+) {
+    let mut dt = ExtiInput::new(dt, dt_exti, Pull::Up, Irqs);
+    let mut clk = ExtiInput::new(clk, clk_exti, Pull::Up, Irqs);
+    loop {
+        // Wait for enable
+        loop {
+            if WATCH_ROTARY_ENCODER_SIGNAL.wait().await {
+                break;
+            }
+        }
+        let mut dt_debouncer = Debouncer::new(Duration::from_millis(1));
+        let mut clk_debouncer = Debouncer::new(Duration::from_millis(1));
+        let mut rotary_encoder = None;
+        let mut position = 0;
+        loop {
+            let new_dt = dt_debouncer.process_data(dt.get_level(), Instant::now());
+            let new_clk = clk_debouncer.process_data(clk.get_level(), Instant::now());
+            let state_changed = new_dt.is_some() || new_clk.is_some();
+            if state_changed
+                && let Some((dt, clk)) = dt_debouncer
+                    .stable_value()
+                    .and_then(|dt| clk_debouncer.stable_value().map(|clk| (*dt, *clk)))
+            {
+                let pins_state = RotaryPinsState {
+                    dt: dt == Level::Low,
+                    clk: clk == Level::Low,
+                };
+                if let Some(direction) = rotary_encoder
+                    .get_or_insert(RotaryEncoder::new(pins_state))
+                    .process_data(pins_state)
+                {
+                    position += match direction {
+                        Direction::Clockwise => 1,
+                        Direction::CounterClockwise => -1,
+                    };
+                    EVENT_SIGNALS[2].signal(Event::RotaryEncoder(position));
+                    NEW_EVENT_SIGNAL.signal(());
+                }
+            }
+            match select5(
+                {
+                    let value = *dt_debouncer.maybe_stable_value().unwrap();
+                    let dt = &mut dt;
+                    async move {
+                        match value {
+                            Level::Low => dt.wait_for_high().await,
+                            Level::High => dt.wait_for_low().await,
+                        }
+                    }
+                },
+                dt_debouncer.wait(),
+                {
+                    let value = *clk_debouncer.maybe_stable_value().unwrap();
+                    let clk = &mut clk;
+                    async move {
+                        match value {
+                            Level::Low => clk.wait_for_high().await,
+                            Level::High => clk.wait_for_low().await,
+                        }
+                    }
+                },
+                clk_debouncer.wait(),
+                async {
+                    loop {
+                        if !WATCH_ROTARY_ENCODER_SIGNAL.wait().await {
+                            break;
+                        }
+                    }
+                },
+            )
+            .await
+            {
+                Either5::First(())
+                | Either5::Second(())
+                | Either5::Third(())
+                | Either5::Fourth(()) => {}
+                Either5::Fifth(()) => {
+                    break;
+                }
+            }
+        }
     }
 }
