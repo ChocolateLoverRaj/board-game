@@ -2,25 +2,37 @@
 #![no_main]
 mod debouncer;
 
+use core::array;
+
 use crate::debouncer::Debouncer;
-use common::{Event, Request};
-use defmt::{debug, warn};
+use common::{Event, MAX_NFC_READERS, Request};
+use defmt::{Debug2Format, debug, info, warn};
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, Either5, select3, select5};
 use embassy_stm32::{
     Config, Peri, bind_interrupts,
     exti::ExtiInput,
-    gpio::{Level, Output, Pull, Speed},
+    gpio::{AnyPin, Level, Output, Pull, Speed},
     mode::Async,
-    peripherals::{DMA1_CH3, EXTI0, EXTI1, EXTI2, PA0, PA1, PA2, PA7, SPI1},
+    peripherals::{
+        DMA1_CH3, DMA1_CH4, DMA1_CH5, EXTI0, EXTI1, EXTI2, EXTI8, EXTI9, EXTI10, PA0, PA1, PA2,
+        PA7, PA8, PA9, PA10, PB13, PB14, PB15, SPI1, SPI2,
+    },
     rcc::{self, APBPrescaler, Hse, HseMode, Pll, PllMul, PllPreDiv, PllSource, Sysclk},
     spi::{self, Spi},
-    time::{khz, mhz},
+    time::{hz, khz, mhz},
     usart::{Uart, UartTx},
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
-use embassy_time::{Duration, Instant};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal};
+use embassy_time::{Delay, Duration, Instant, Timer, WithTimeout};
 use embedded_io_async::Write;
+use heapless::{Vec, index_set::FnvIndexSet};
+use hex_fmt::HexFmt;
+use mfrc522::{
+    AsyncMfrc522, AsyncPollingWaiterProvider, CardCommandError, Mfrc522, ReqWupA, RxGain, Select,
+    SpiRegisterAccess,
+};
 use pure_rotary_encoder::{Direction, RotaryEncoder, RotaryPinsState};
 use smart_leds::{RGB, SmartLedsWriteAsync};
 use ws2812_async::{Grb, Ws2812};
@@ -28,16 +40,16 @@ use ws2812_async::{Grb, Ws2812};
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
-    USART1 => embassy_stm32::usart::InterruptHandler<embassy_stm32::peripherals::USART1>;
-    EXTI0 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI0>;
-    EXTI1 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI1>;
-    EXTI2 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI2>;
+    USART2 => embassy_stm32::usart::InterruptHandler<embassy_stm32::peripherals::USART2>;
+    EXTI9_5 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI9_5>;
+    EXTI15_10 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI15_10>;
 });
 
 type M = CriticalSectionRawMutex;
 
 static NEW_EVENT_SIGNAL: Signal<M, ()> = Signal::new();
-static EVENT_SIGNALS: [Signal<M, Event>; 3] = [Signal::new(), Signal::new(), Signal::new()];
+static EVENT_SIGNALS: [Signal<M, Event>; 4] =
+    [Signal::new(), Signal::new(), Signal::new(), Signal::new()];
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
@@ -63,16 +75,44 @@ async fn main(spawner: Spawner) -> ! {
     });
 
     spawner.spawn(leds_task(p.SPI1, p.PA7, p.DMA1_CH3)).unwrap();
-    spawner.spawn(rotary_switch_task(p.PA0, p.EXTI0)).unwrap();
+    spawner.spawn(rotary_switch_task(p.PA10, p.EXTI10)).unwrap();
     spawner
-        .spawn(rotary_encoder_task(p.PA1, p.EXTI1, p.PA2, p.EXTI2))
+        .spawn(rotary_encoder_task(p.PA9, p.EXTI9, p.PA8, p.EXTI8))
+        .unwrap();
+
+    let mut reset_pin = Output::new(p.PB11, Level::High, Speed::Low);
+    // reset_pin.set_low();
+    // Timer::after_nanos(1000).await;
+    // reset_pin.set_high();
+    // Timer::after_nanos(37_740).await;
+    // Timer::after_secs(1).await;
+
+    spawner
+        .spawn(nfc_task(
+            p.SPI2,
+            p.PB15,
+            p.PB14,
+            p.PB13,
+            p.DMA1_CH5,
+            p.DMA1_CH4,
+            {
+                let mut v = Vec::new();
+                v.push(p.PA0.into()).ok().unwrap();
+                v.push(p.PA4.into()).ok().unwrap();
+                v.push(p.PB6.into()).ok().unwrap();
+                v.push(p.PB0.into()).ok().unwrap();
+                v.push(p.PB1.into()).ok().unwrap();
+                v.push(p.PB5.into()).ok().unwrap();
+                v
+            },
+        ))
         .unwrap();
 
     let mut led = Output::new(p.PC13, Level::High, Speed::Low);
 
-    let uart = Uart::new(p.USART1, p.PA10, p.PA9, Irqs, p.DMA1_CH4, p.DMA1_CH5, {
+    let uart = Uart::new(p.USART2, p.PA3, p.PA2, Irqs, p.DMA1_CH7, p.DMA1_CH6, {
         let mut config = embassy_stm32::usart::Config::default();
-        config.baudrate = 4_500_000;
+        config.baudrate = 2_250_000;
         config.eager_reads = Some(1);
         config
     })
@@ -85,7 +125,14 @@ async fn main(spawner: Spawner) -> ! {
     let mut buffer = [Default::default(); 1024];
     let mut buffer_bytes = 0;
     loop {
-        let new_bytes_read = uart_rx.read(&mut buffer[buffer_bytes..]).await.unwrap();
+        debug!("waiting to read bytes");
+        let new_bytes_read = match uart_rx.read(&mut buffer[buffer_bytes..]).await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("error reading UART: {}", e);
+                continue;
+            }
+        };
         {
             let new_bytes = &buffer[buffer_bytes..buffer_bytes + new_bytes_read];
             debug!("received bytes: {}", new_bytes);
@@ -104,6 +151,8 @@ async fn main(spawner: Spawner) -> ! {
                         led.set_high();
                         LEDS_SIGNAL.signal([Default::default(); _]);
                         WATCH_ROTARY_SWITCH_SIGNAL.signal(false);
+                        WATCH_ROTARY_ENCODER_SIGNAL.signal(false);
+                        WATCH_NFC_SIGNAL.signal(false);
                         EVENT_SIGNALS[0].signal(Event::SoftResetComplete);
                         NEW_EVENT_SIGNAL.signal(());
                     }
@@ -118,6 +167,9 @@ async fn main(spawner: Spawner) -> ! {
                     }
                     Request::WatchRotaryEncoder(watch) => {
                         WATCH_ROTARY_ENCODER_SIGNAL.signal(watch);
+                    }
+                    Request::WatchNfc(watch) => {
+                        WATCH_NFC_SIGNAL.signal(watch);
                     }
                 },
                 Err(e) => {
@@ -169,7 +221,7 @@ async fn leds_task(
 
 static WATCH_ROTARY_SWITCH_SIGNAL: Signal<M, bool> = Signal::new();
 #[embassy_executor::task]
-async fn rotary_switch_task(pin: Peri<'static, PA0>, exti: Peri<'static, EXTI0>) {
+async fn rotary_switch_task(pin: Peri<'static, PA10>, exti: Peri<'static, EXTI10>) {
     let mut sw = ExtiInput::new(pin, exti, Pull::Up, Irqs);
     loop {
         // Wait for enable
@@ -219,10 +271,10 @@ async fn rotary_switch_task(pin: Peri<'static, PA0>, exti: Peri<'static, EXTI0>)
 static WATCH_ROTARY_ENCODER_SIGNAL: Signal<M, bool> = Signal::new();
 #[embassy_executor::task]
 async fn rotary_encoder_task(
-    dt: Peri<'static, PA1>,
-    dt_exti: Peri<'static, EXTI1>,
-    clk: Peri<'static, PA2>,
-    clk_exti: Peri<'static, EXTI2>,
+    dt: Peri<'static, PA9>,
+    dt_exti: Peri<'static, EXTI9>,
+    clk: Peri<'static, PA8>,
+    clk_exti: Peri<'static, EXTI8>,
 ) {
     let mut dt = ExtiInput::new(dt, dt_exti, Pull::Up, Irqs);
     let mut clk = ExtiInput::new(clk, clk_exti, Pull::Up, Irqs);
@@ -304,5 +356,166 @@ async fn rotary_encoder_task(
                 }
             }
         }
+    }
+}
+
+static WATCH_NFC_SIGNAL: Signal<M, bool> = Signal::new();
+#[embassy_executor::task]
+async fn nfc_task(
+    spi: Peri<'static, SPI2>,
+    pico: Peri<'static, PB15>,
+    poci: Peri<'static, PB14>,
+    sck: Peri<'static, PB13>,
+    tx_dma: Peri<'static, DMA1_CH5>,
+    rx_dma: Peri<'static, DMA1_CH4>,
+    cs_pins: Vec<Peri<'static, AnyPin>, MAX_NFC_READERS>,
+) {
+    let spi = Mutex::<M, _>::new(Spi::new(
+        spi,
+        sck,
+        pico,
+        poci,
+        tx_dma,
+        rx_dma,
+        spi::Config::default(),
+    ));
+    let mut nfc_readers = {
+        let mut nfc_readers = cs_pins
+            .into_iter()
+            .map(|cs_pin| {
+                AsyncMfrc522::new(
+                    SpiRegisterAccess::new(SpiDeviceWithConfig::new(
+                        &spi,
+                        Output::new(cs_pin, Level::High, Speed::Low),
+                        {
+                            let mut config = spi::Config::default();
+                            config.frequency = hz(10_000_000);
+                            config.mode = spi::MODE_0;
+                            config
+                        },
+                    )),
+                    AsyncPollingWaiterProvider::new(Delay, 25),
+                )
+            })
+            .collect::<Vec<_, MAX_NFC_READERS>>();
+        let mut working_nfc_readers = 0;
+        for (i, nfc_reader) in nfc_readers.iter_mut().enumerate() {
+            let version = async {
+                nfc_reader
+                    .soft_reset()
+                    .with_timeout(Duration::from_secs(1))
+                    .await
+                    .ok()
+                    .and_then(|result| result.ok())?;
+                nfc_reader.init().await.ok()?;
+                nfc_reader.set_antenna_gain(RxGain::DB18).await.ok()?;
+                let version = nfc_reader.version().await.ok()?;
+                info!(
+                    "[{}] NFC reader chip type: {:#04X}, version: {:#04X}",
+                    i,
+                    version.get_chip_type(),
+                    version.get_version()
+                );
+                if [0x8, 0x9].contains(&version.get_chip_type()) && version.get_version() == 0x2 {
+                    Some(version)
+                } else {
+                    warn!("[{}] buggy NFC reader", i);
+                    None
+                }
+            }
+            .await;
+            if version.is_some() {
+                working_nfc_readers += 1;
+            } else {
+                break;
+            }
+        }
+        info!(
+            "{}/{} working NFC readers",
+            working_nfc_readers, MAX_NFC_READERS
+        );
+        nfc_readers.drain(working_nfc_readers..);
+        nfc_readers
+    };
+
+    // Check for cards at one device at a time
+    // There are two reasons why we are only checking one device at a time
+    // One is that they can interfere with each other
+    // Another reason is to not overload the 5V to 3.3V converter on the esp32c3
+    let mut enabled = false;
+    loop {
+        if let Some(new_enabled) = WATCH_NFC_SIGNAL.try_take() {
+            enabled = new_enabled;
+        }
+        if !enabled {
+            enabled = WATCH_NFC_SIGNAL.wait().await;
+            continue;
+        }
+
+        // let mut ids = FnvIndexSet::<_, { MAX_NFC_READERS.next_power_of_two() }>::new();
+        // let mut detected_ids = array::from_fn::<_, MAX_NFC_READERS, _>(|_| None);
+        let mut detected_ids = Vec::<_, MAX_NFC_READERS>::new();
+        // let before = Instant::now();
+        for (_i, device) in nfc_readers.iter_mut().enumerate() {
+            // let version = device.version().await.unwrap();
+            // if [0x8, 0x9].contains(&version.get_chip_type()) && version.get_version() == 0x2 {
+            //     info!("[{}] version good", i);
+            // } else {
+            //     info!(
+            //         "[{}] NFC reader chip type: {:#04X}, version: {:#04X}",
+            //         i,
+            //         version.get_chip_type(),
+            //         version.get_version()
+            //     );
+            // }
+            // Timer::after_millis(100).await;
+            device.set_antenna_enabled(true).await.unwrap();
+            debug!("Doing  WUPA");
+            let uid = match device.card_command(ReqWupA::new(true)).await {
+                Ok(atq_a) => {
+                    if let Ok(select) = Select::new(&atq_a) {
+                        match device.card_command(select).await {
+                            Ok(uid) => {
+                                // info!("detected uid: {}", uid);
+                                // ids.insert(uid).unwrap();
+                                Some(uid)
+                            }
+                            Err(CardCommandError::CardCommand(e)) => {
+                                debug!("SELECT error: {}", e);
+                                None
+                            }
+                            Err(_e) => {
+                                debug!("SELECT error");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Err(CardCommandError::CardCommand(e)) => {
+                    debug!("WupA error: {}", e);
+                    None
+                }
+                Err(_e) => {
+                    debug!("WUPA error");
+                    None
+                }
+            };
+            detected_ids.push(uid).unwrap();
+            device.set_antenna_enabled(false).await.unwrap();
+        }
+        // let ids_hex = detected_ids
+        //     .iter()
+        //     .map(|id| id.as_ref().map(|id| HexFmt(id.as_bytes())))
+        //     .collect::<Vec<_, MAX_NFC_READERS>>();
+        // info!(
+        //     "scanned ids: {:#?} in {}us",
+        //     Debug2Format(&ids_hex),
+        //     before.elapsed().as_micros()
+        // );
+        EVENT_SIGNALS[3].signal(Event::Nfc(detected_ids));
+        NEW_EVENT_SIGNAL.signal(());
+        // Timer::after_millis(25).await;
     }
 }
