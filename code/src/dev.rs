@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::iter::{once, repeat_n};
+use core::{
+    array,
+    iter::{once, repeat_n},
+};
 
 use collect_array_ext_trait::CollectArray;
 use common::{Event, MAX_NFC_READERS, Request};
@@ -9,18 +12,22 @@ use defmt::{Debug2Format, debug, error, info, warn};
 use display_interface::DisplayError;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDeviceWithConfig;
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal};
+use embassy_futures::select::{Either, select};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal, watch::Watch,
+};
 use embassy_time::{Duration, Instant, Timer};
-use embedded_io_async::Write;
+use embedded_io_async::{Read, Write};
 use esp_backtrace as _;
 use esp_hal::{
     Async,
     i2c::{self, master::I2c},
     interrupt::software::SoftwareInterruptControl,
-    peripherals::{GPIO5, GPIO6, I2C0},
+    peripherals::{GPIO5, GPIO6, I2C0, USB_DEVICE},
     time::Rate,
     timer::timg::TimerGroup,
     uart::{self, Uart, UartRx, UartTx},
+    usb_serial_jtag::UsbSerialJtag,
 };
 use heapless::Vec;
 use mfrc522::Uid;
@@ -28,6 +35,8 @@ use smart_leds::{RGB, brightness};
 use ssd1306::{I2CDisplayInterface, Ssd1306Async, prelude::*, size::DisplaySize128x64};
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+static IS_RUNNING: Watch<M, bool, 3> = Watch::new_with(true);
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
@@ -44,6 +53,7 @@ async fn main(spawner: Spawner) {
         "Hello from the secret hitler dev program. This will use all the peripherals to make sure they are working all at the same time."
     );
 
+    spawner.spawn(usb_task(p.USB_DEVICE)).unwrap();
     spawner
         .spawn(display_task(p.I2C0, p.GPIO5, p.GPIO6))
         .unwrap();
@@ -71,6 +81,30 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
+async fn usb_task(usb_device: USB_DEVICE<'static>) {
+    let mut jtag = UsbSerialJtag::new(usb_device).into_async();
+    let mut buffer = [Default::default(); 1024];
+    let mut is_running = true;
+    loop {
+        let bytes_read = jtag.read(&mut buffer).await.unwrap();
+        for byte in &buffer[..bytes_read] {
+            match byte {
+                b'p' => {
+                    if is_running {
+                        info!("pausing");
+                    } else {
+                        info!("resuming");
+                    }
+                    is_running = !is_running;
+                    IS_RUNNING.sender().send(is_running);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
 async fn display_task(i2c: I2C0<'static>, scl: GPIO5<'static>, sda: GPIO6<'static>) {
     let i2c = Mutex::<CriticalSectionRawMutex, _>::new(
         I2c::new(i2c, i2c::master::Config::default())
@@ -94,11 +128,38 @@ async fn display_task(i2c: I2C0<'static>, scl: GPIO5<'static>, sda: GPIO6<'stati
         display.init().await?;
         display.clear_buffer();
         display.flush().await?;
-        let mut invert = false;
+        let mut receiver = IS_RUNNING.receiver().unwrap();
         loop {
-            display.set_invert(invert).await?;
-            Timer::after_millis(5000).await;
-            invert = !invert;
+            loop {
+                if receiver.get().await {
+                    break;
+                }
+                receiver.changed().await;
+            }
+            match select(
+                async {
+                    let mut invert = false;
+                    loop {
+                        display.set_invert(invert).await?;
+                        Timer::after_millis(5000).await;
+                        invert = !invert;
+                    }
+                },
+                async {
+                    loop {
+                        if !receiver.get().await {
+                            break;
+                        }
+                        receiver.changed().await;
+                    }
+                },
+            )
+            .await
+            {
+                Either::First(result) => result,
+                Either::Second(()) => Ok(()),
+            }?;
+            display.set_invert(false).await?;
         }
     }
     .await;
@@ -196,7 +257,13 @@ async fn leds_task() {
     let frame_interval = Duration::from_millis(100);
     let start_time = Instant::now();
     let mut last_rendered_frame = None;
+    let mut receiver = IS_RUNNING.receiver().unwrap();
     loop {
+        if !receiver.try_get().unwrap() {
+            REQUEST_SIGNALS[2].signal(Request::SetLeds(array::repeat(Default::default())));
+            NEW_REQUEST_SIGNAL.signal(());
+            receiver.changed_and(|bool| *bool).await;
+        }
         if let Some(frame_number) = last_rendered_frame {
             Timer::at(start_time + frame_interval * (frame_number as u32 + 1)).await;
         }
@@ -224,7 +291,13 @@ async fn leds_task() {
 #[embassy_executor::task]
 async fn led_task() {
     let mut led_level = false;
+    let mut receiver = IS_RUNNING.receiver().unwrap();
     loop {
+        if !receiver.try_get().unwrap() {
+            REQUEST_SIGNALS[1].signal(Request::SetLed(true));
+            NEW_REQUEST_SIGNAL.signal(());
+            receiver.changed_and(|bool| *bool).await;
+        }
         REQUEST_SIGNALS[1].signal(Request::SetLed(led_level));
         NEW_REQUEST_SIGNAL.signal(());
         led_level = !led_level;
