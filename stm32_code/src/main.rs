@@ -398,6 +398,37 @@ async fn nfc_task(
                 )
             })
             .collect::<Vec<_, MAX_NFC_READERS>>();
+        // let mut last_logged = None;
+        // loop {
+        //     let now = Instant::now();
+        //     let should_log = match last_logged {
+        //         Some(last_logged) => (now - last_logged) >= Duration::from_secs(1),
+        //         None => true,
+        //     };
+        //     if should_log {
+        //         last_logged = Some(now);
+        //     }
+        //     for (i, nfc_reader) in nfc_readers.iter_mut().enumerate() {
+        //         for _ in 0..1 {
+        //             if let Ok(version) = nfc_reader.version().await {
+        //                 if [0x8, 0x9].contains(&version.get_chip_type())
+        //                     && version.get_version() == 0x2
+        //                 {
+        //                     if should_log {
+        //                         info!("[{}] NFC reader good", i);
+        //                     }
+        //                 } else {
+        //                     if should_log {
+        //                         warn!("[{}] buggy NFC reader: {:#04X}", i, version);
+        //                     }
+        //                 }
+        //             } else {
+        //                 warn!("[{}] NFC reader error", i);
+        //             }
+        //         }
+        //     }
+        //     // Timer::after_secs(1).await;
+        // }
         let mut working_nfc_readers = 0;
         for (i, nfc_reader) in nfc_readers.iter_mut().enumerate() {
             let version = async {
@@ -516,6 +547,11 @@ async fn nfc_task(
         // );
         EVENT_SIGNALS[3].signal(Event::Nfc(detected_ids));
         NEW_EVENT_SIGNAL.signal(());
+
+        if nfc_readers.is_empty() {
+            // TODO: Only send this once
+            Timer::after_secs(1).await;
+        }
         // Timer::after_millis(25).await;
     }
 }

@@ -49,7 +49,7 @@ async fn main(spawner: Spawner) {
         .unwrap();
     let (uart_rx, uart_tx) = Uart::new(p.UART0, uart::Config::default().with_baudrate(2_250_000))
         .unwrap()
-        .with_tx(p.GPIO8)
+        .with_tx(p.GPIO0)
         .with_rx(p.GPIO7)
         .into_async()
         .split();
@@ -191,9 +191,9 @@ async fn uart_rx_task(mut uart_rx: UartRx<'static, Async>) {
 #[embassy_executor::task]
 async fn leds_task() {
     const TOTAL_LEDS: usize = 64;
-    // We can push this to the limit!
-    // This is 333 fps!
-    let frame_interval = Duration::from_millis(3);
+    // We can push this to the limit with an interval of 3ms!
+    // But to actually be able to see that it's not skipping any LEDs, we reduce this.
+    let frame_interval = Duration::from_millis(100);
     let start_time = Instant::now();
     let mut last_rendered_frame = None;
     loop {
