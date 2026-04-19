@@ -310,6 +310,7 @@ async fn rotary_encoder_task(
                         Direction::Clockwise => 1,
                         Direction::CounterClockwise => -1,
                     };
+                    info!("rotary position: {}", position);
                     EVENT_SIGNALS[2].signal(Event::RotaryEncoder(position));
                     NEW_EVENT_SIGNAL.signal(());
                 }
